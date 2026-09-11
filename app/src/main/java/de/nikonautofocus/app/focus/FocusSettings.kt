@@ -50,8 +50,8 @@ data class FocusSettings(
      *
      * When off, sharpness is measured over the whole frame - a busy background then counts
      * as much as the subject. When on, only the field is measured, so the watchdog reacts
-     * to the subject rather than to the scene. Tapping the preview moves it, and the same
-     * position is sent to the camera as its AF area when the body supports 0x9205.
+     * to the subject rather than to the scene. Dragging or tapping the preview moves it, and
+     * the same position is sent to the camera as its AF area when the body supports 0x9205.
      */
     val manualFieldEnabled: Boolean = false,
 

@@ -50,9 +50,10 @@ class SettingsRepository(context: Context) {
         ).sanitized()
     }
 
-    fun update(transform: (FocusSettings) -> FocusSettings) {
+    fun update(persist: Boolean = true, transform: (FocusSettings) -> FocusSettings) {
         val next = transform(_settings.value).sanitized()
         _settings.value = next
+        if (!persist) return
         prefs.edit()
             .putFloat(KEY_THRESHOLD, next.threshold.toFloat())
             .putInt(KEY_FRAMES, next.requiredBlurryFrames)
@@ -74,7 +75,7 @@ class SettingsRepository(context: Context) {
             .apply()
     }
 
-    fun resetToDefaults() = update { FocusSettings() }
+    fun resetToDefaults() = update { _ -> FocusSettings() }
 
     companion object {
         private const val PREFS_NAME = "focus_settings"

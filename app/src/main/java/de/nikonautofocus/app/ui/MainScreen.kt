@@ -5,8 +5,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,7 +67,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -104,7 +108,7 @@ fun MainScreen(
     onSetAppControl: (Boolean) -> Unit,
     onSetAfAreaMode: (Long) -> Unit,
     onSetAfServoMode: (Long) -> Unit,
-    onTapFocusPoint: (Float, Float) -> Unit,
+    onMoveFocusPoint: (Float, Float, Boolean) -> Unit,
     onSetFieldEnabled: (Boolean) -> Unit,
     onSetFieldSize: (Float) -> Unit,
     onSetCameraProperty: (Int, Long, Int) -> Unit,
@@ -162,7 +166,7 @@ fun MainScreen(
                 state = state,
                 settings = settings,
                 preview = preview,
-                onTapFocusPoint = onTapFocusPoint,
+                onMoveFocusPoint = onMoveFocusPoint,
                 onCapturePhoto = onCapturePhoto,
                 onToggleRecording = onToggleRecording,
                 onFocusNow = onFocusNow,
@@ -207,7 +211,7 @@ fun MainScreen(
                 settings = settings,
                 preview = preview,
                 isFullscreen = true,
-                onTapFocusPoint = onTapFocusPoint,
+                onMoveFocusPoint = onMoveFocusPoint,
                 onCapturePhoto = onCapturePhoto,
                 onToggleRecording = onToggleRecording,
                 onFocusNow = onFocusNow,
@@ -357,6 +361,115 @@ private fun fittedImageRect(
 }
 
 /**
+ * Pointer position in the LiveView box (already in the graphicsLayer local space) mapped
+ * onto the letterboxed image as 0..1. Null when the box or the image has no size.
+ */
+internal fun imageFractionFromPointer(
+    pointer: Offset,
+    boxWidth: Float,
+    boxHeight: Float,
+    imageWidth: Int,
+    imageHeight: Int
+): Offset? {
+    val rect = fittedImageRect(boxWidth, boxHeight, imageWidth, imageHeight)
+    if (rect[2] <= 0f || rect[3] <= 0f) return null
+    return Offset(
+        (pointer.x - rect[0]) / rect[2],
+        (pointer.y - rect[1]) / rect[3]
+    )
+}
+
+private suspend fun PointerInputScope.detectLiveViewGestures(
+    moveField: Boolean,
+    onFieldAt: (Offset) -> Offset?,
+    onFieldMove: (Offset) -> Unit,
+    onFieldCommit: (Offset) -> Unit,
+    onTap: (Offset) -> Unit,
+    onDoubleTap: () -> Unit,
+    onPinch: (pan: Offset, zoom: Float) -> Unit,
+    onOneFingerPan: (pan: Offset) -> Unit
+) {
+    var lastTapUptime = 0L
+    var lastTapPosition = Offset.Zero
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        var pastSlop = false
+        var multiTouch = false
+        var lastFieldFraction: Offset? = null
+        var lastPosition = Offset.Zero
+        val touchSlop = viewConfiguration.touchSlop
+        var accumulated = Offset.Zero
+
+        while (true) {
+            val event = awaitPointerEvent()
+            val pressed = event.changes.filter { it.pressed }
+            val pointerChange = event.changes.firstOrNull()
+            if (pointerChange != null) lastPosition = pointerChange.position
+            if (pressed.isEmpty()) break
+
+            if (pressed.size >= 2) {
+                multiTouch = true
+                onPinch(event.calculatePan(), event.calculateZoom())
+                event.changes.forEach { pointer ->
+                    if (pointer.positionChanged()) pointer.consume()
+                }
+                continue
+            }
+
+            if (multiTouch) {
+                event.changes.forEach { pointer ->
+                    if (pointer.positionChanged()) pointer.consume()
+                }
+                continue
+            }
+
+            val drag = pressed[0]
+            val delta = drag.position - drag.previousPosition
+            accumulated += delta
+            if (!pastSlop && accumulated.getDistance() > touchSlop) {
+                pastSlop = true
+            }
+            if (pastSlop) {
+                if (moveField) {
+                    val fraction = onFieldAt(drag.position)
+                    if (fraction != null) {
+                        val coerced = Offset(
+                            fraction.x.coerceIn(0f, 1f),
+                            fraction.y.coerceIn(0f, 1f)
+                        )
+                        lastFieldFraction = coerced
+                        onFieldMove(coerced)
+                    }
+                } else {
+                    onOneFingerPan(delta)
+                }
+                drag.consume()
+            }
+        }
+
+        if (multiTouch) return@awaitEachGesture
+        if (pastSlop) {
+            lastFieldFraction?.let(onFieldCommit)
+            return@awaitEachGesture
+        }
+
+        val up = lastPosition
+        val now = android.os.SystemClock.uptimeMillis()
+        val doubleTap = lastTapUptime != 0L &&
+            now - lastTapUptime <= viewConfiguration.doubleTapTimeoutMillis &&
+            (up - lastTapPosition).getDistance() < touchSlop * 3
+        if (doubleTap) {
+            lastTapUptime = 0L
+            onDoubleTap()
+        } else {
+            lastTapUptime = now
+            lastTapPosition = up
+            onTap(up)
+        }
+    }
+}
+
+/**
  * Draws one focus frame into the fitted image rectangle.
  *
  * @param rect    output of [fittedImageRect]: left, top, width, height
@@ -430,7 +543,7 @@ private fun PreviewCard(
     state: UiState,
     settings: FocusSettings,
     preview: ImageBitmap?,
-    onTapFocusPoint: (Float, Float) -> Unit,
+    onMoveFocusPoint: (Float, Float, Boolean) -> Unit,
     onCapturePhoto: () -> Unit,
     onToggleRecording: () -> Unit,
     onFocusNow: () -> Unit,
@@ -454,7 +567,7 @@ private fun PreviewCard(
                 settings = settings,
                 preview = preview,
                 isFullscreen = false,
-                onTapFocusPoint = onTapFocusPoint,
+                onMoveFocusPoint = onMoveFocusPoint,
                 onCapturePhoto = onCapturePhoto,
                 onToggleRecording = onToggleRecording,
                 onFocusNow = onFocusNow,
@@ -471,7 +584,7 @@ private fun LiveViewStage(
     settings: FocusSettings,
     preview: ImageBitmap?,
     isFullscreen: Boolean,
-    onTapFocusPoint: (Float, Float) -> Unit,
+    onMoveFocusPoint: (Float, Float, Boolean) -> Unit,
     onCapturePhoto: () -> Unit,
     onToggleRecording: () -> Unit,
     onFocusNow: () -> Unit,
@@ -498,49 +611,72 @@ private fun LiveViewStage(
                         translationX = panX
                         translationY = panY
                     }
-                    .pointerInput(preview, state.canTapPreview) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            val next = (zoomScale * zoom).coerceIn(1f, 5f)
-                            zoomScale = next
-                            if (next <= 1.01f) {
+                    .pointerInput(
+                        preview.width,
+                        preview.height,
+                        settings.manualFieldEnabled,
+                        state.canTapPreview
+                    ) {
+                        val canMoveField = settings.manualFieldEnabled &&
+                            (state.canTapPreview || state.connected)
+                        detectLiveViewGestures(
+                            moveField = canMoveField,
+                            onFieldAt = { pointer ->
+                                imageFractionFromPointer(
+                                    pointer,
+                                    size.width.toFloat(),
+                                    size.height.toFloat(),
+                                    preview.width,
+                                    preview.height
+                                )
+                            },
+                            onFieldMove = { fraction ->
+                                onMoveFocusPoint(fraction.x, fraction.y, false)
+                            },
+                            onFieldCommit = { fraction ->
+                                onMoveFocusPoint(fraction.x, fraction.y, true)
+                            },
+                            onTap = { pointer ->
+                                if (state.canTapPreview) {
+                                    val fraction = imageFractionFromPointer(
+                                        pointer,
+                                        size.width.toFloat(),
+                                        size.height.toFloat(),
+                                        preview.width,
+                                        preview.height
+                                    )
+                                    if (fraction != null &&
+                                        fraction.x in 0f..1f &&
+                                        fraction.y in 0f..1f
+                                    ) {
+                                        onMoveFocusPoint(fraction.x, fraction.y, true)
+                                    }
+                                }
+                            },
+                            onDoubleTap = {
+                                zoomScale = 1f
                                 panX = 0f
                                 panY = 0f
-                            } else {
-                                panX += pan.x
-                                panY += pan.y
+                            },
+                            onPinch = { pan, zoom ->
+                                val next = (zoomScale * zoom).coerceIn(1f, 5f)
+                                zoomScale = next
+                                if (next <= 1.01f) {
+                                    panX = 0f
+                                    panY = 0f
+                                } else {
+                                    panX += pan.x
+                                    panY += pan.y
+                                }
+                            },
+                            onOneFingerPan = { pan ->
+                                if (zoomScale > 1.01f) {
+                                    panX += pan.x
+                                    panY += pan.y
+                                }
                             }
-                        }
+                        )
                     }
-                    .then(
-                        if (state.canTapPreview) {
-                            Modifier.pointerInput(preview, state.canTapPreview, zoomScale, panX, panY) {
-                                detectTapGestures(
-                                    onDoubleTap = {
-                                        zoomScale = 1f
-                                        panX = 0f
-                                        panY = 0f
-                                    },
-                                    onTap = { offset ->
-                                        val unzoomedX = size.width / 2f +
-                                            (offset.x - size.width / 2f - panX) / zoomScale
-                                        val unzoomedY = size.height / 2f +
-                                            (offset.y - size.height / 2f - panY) / zoomScale
-                                        val rect = fittedImageRect(
-                                            size.width.toFloat(),
-                                            size.height.toFloat(),
-                                            preview.width,
-                                            preview.height
-                                        )
-                                        val fx = (unzoomedX - rect[0]) / rect[2]
-                                        val fy = (unzoomedY - rect[1]) / rect[3]
-                                        if (fx in 0f..1f && fy in 0f..1f) onTapFocusPoint(fx, fy)
-                                    }
-                                )
-                            }
-                        } else {
-                            Modifier
-                        }
-                    )
             ) {
                     Image(
                         bitmap = preview,
@@ -847,7 +983,7 @@ private fun ManualFieldControls(
                 fontWeight = FontWeight.Medium
             )
             Text(
-                "Schaerfe nur im Feld messen. Tippe ins Vorschaubild, um es zu setzen. " +
+                "Schaerfe nur im Feld messen. Feld mit dem Finger ziehen oder antippen. " +
                     "ACHTUNG: aendert die Skala des Schaerfewerts, Schwellwert neu einstellen.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Muted

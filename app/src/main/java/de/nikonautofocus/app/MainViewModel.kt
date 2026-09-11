@@ -458,22 +458,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Handles a tap on the preview. [fractionX] / [fractionY] are relative to the displayed
-     * LiveView image, 0..1.
+     * Moves the user measuring field and optionally the camera AF area.
      *
-     * Two things can happen, and both are wanted at once when available:
-     *  - the measuring field moves there, so the sharpness watchdog looks at that spot;
-     *  - the camera AF area moves there via ChangeAfArea, so the body focuses on it.
+     * [fractionX] / [fractionY] are relative to the displayed LiveView image, 0..1.
+     * During a finger drag [syncCamera] is false so SharedPreferences and ChangeAfArea
+     * are not hit on every pointer event; the last call of a gesture passes true.
      */
-    fun setAfPoint(fractionX: Float, fractionY: Float) {
-        if (!usbManager.isConnected) return
+    fun moveFocusField(fractionX: Float, fractionY: Float, syncCamera: Boolean = true) {
         val x = fractionX.coerceIn(0f, 1f)
         val y = fractionY.coerceIn(0f, 1f)
 
         if (settingsRepository.current.manualFieldEnabled) {
-            updateSettings { it.copy(manualFieldX = x, manualFieldY = y) }
+            settingsRepository.update(persist = syncCamera) {
+                it.copy(manualFieldX = x, manualFieldY = y)
+            }
+            stateMachine.updateSettings(settingsRepository.current)
+            publish()
         }
 
+        if (!syncCamera) return
+        changeCameraAfArea(x, y)
+    }
+
+    /** Tap on the preview: move the field (if on) and send ChangeAfArea. */
+    fun setAfPoint(fractionX: Float, fractionY: Float) =
+        moveFocusField(fractionX, fractionY, syncCamera = true)
+
+    private fun changeCameraAfArea(x: Float, y: Float) {
+        if (!usbManager.isConnected) return
         if (capabilities?.changeAfArea != true) return
         if (lastAfImageWidth <= 0 || lastAfImageHeight <= 0) return
         val pixelX = (x * lastAfImageWidth).toInt()
@@ -752,7 +764,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------ settings
 
     fun updateSettings(transform: (FocusSettings) -> FocusSettings) {
-        settingsRepository.update(transform)
+        settingsRepository.update(transform = transform)
         val updated = settingsRepository.current
         stateMachine.updateSettings(updated)
         analyzer.targetWidth = updated.analysisWidth

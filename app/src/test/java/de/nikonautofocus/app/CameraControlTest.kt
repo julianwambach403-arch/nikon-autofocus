@@ -127,4 +127,25 @@ class CameraControlTest {
         assertTrue(merged.hasProperty(PtpConstants.DPC_NIKON_RECORDING_MEDIA))
         assertEquals(1, merged.devicePropertiesSupported.size)
     }
+
+    @Test
+    fun `pointer in a letterboxed liveview maps to image fractions`() {
+        val boxW = 300f
+        val boxH = 200f
+        val imageW = 600
+        val imageH = 400
+        val center = de.nikonautofocus.app.ui.imageFractionFromPointer(
+            androidx.compose.ui.geometry.Offset(150f, 100f),
+            boxW, boxH, imageW, imageH
+        )
+        assertEquals(0.5f, center!!.x, 0.001f)
+        assertEquals(0.5f, center.y, 0.001f)
+
+        val topLeft = de.nikonautofocus.app.ui.imageFractionFromPointer(
+            androidx.compose.ui.geometry.Offset(0f, 0f),
+            boxW, boxH, imageW, imageH
+        )
+        assertEquals(0f, topLeft!!.x, 0.001f)
+        assertEquals(0f, topLeft.y, 0.001f)
+    }
 }

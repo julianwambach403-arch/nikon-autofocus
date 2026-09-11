@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
                     onSetAppControl = viewModel::setAppControlsCamera,
                     onSetAfAreaMode = viewModel::setAfAreaMode,
                     onSetAfServoMode = viewModel::setAfServoMode,
-                    onTapFocusPoint = viewModel::setAfPoint,
+                    onMoveFocusPoint = viewModel::moveFocusField,
                     onSetFieldEnabled = viewModel::setManualFieldEnabled,
                     onSetFieldSize = viewModel::setManualFieldSize,
                     onSetCameraProperty = viewModel::setCameraProperty,
