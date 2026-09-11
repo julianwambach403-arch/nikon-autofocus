@@ -215,6 +215,16 @@ class UsbPtpManager(private val context: Context) {
                 throw CameraException(CameraError.NotNikon(info.model.ifBlank { "unbekannt" }))
             }
 
+            // Nikon hides its 0xD0xx/0xD1xx properties behind 0x90CA. Without this query the
+            // D3400 looks like it had neither LiveViewStatus nor RecordingMedia nor
+            // ApplicationMode, and every property-gated code path silently does nothing.
+            if (info.supports(PtpConstants.OC_NIKON_GET_VENDOR_PROP_CODES)) {
+                val vendorProps = runCatching { session.getNikonVendorPropCodes() }
+                    .getOrDefault(emptySet())
+                Log.i(TAG, "Nikon_GetVendorPropCodes: ${vendorProps.size} Properties")
+                info = info.withVendorPropertyCodes(vendorProps)
+            }
+
             val newCamera = NikonPtpCamera(session, info)
             transport = newTransport
             camera = newCamera

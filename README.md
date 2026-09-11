@@ -278,6 +278,24 @@ Alle Werte stammen aus dem Nikon-Vendor-Opcode-Bereich, wie er in `libgphoto2`
 | `0xD1A6` | `LiveViewSelector` (Property) | 0 Foto-LiveView, 1 Video-LiveView; vor 0x920A auf 1 gesetzt |
 | `0xD10B` | `RecordingMedia` (Property) | Vor Foto **und** Videostart auf Speicherkarte gesetzt (0x920A = roter Knopf) |
 
+### LiveView-Kamerasteuerung (Camera Connect & Control)
+
+Die App übernimmt die **guten Aspekte** der Fernsteuerungs-UI von *Camera Connect & Control* – LiveView als Arbeitsfläche, Belichtung direkt am Bild, Histogramm, Gitter, großer Auslöser – **ohne** deren APK oder Code zu verwenden. Alles läuft über die vorhandene PTP-Schicht und nur über Properties, die `DeviceInfo` der angeschlossenen Kamera wirklich auflistet.
+
+| Anzeige | PTP-Property | Anmerkung |
+|---|---|---|
+| Belichtungsmodus P/S/A/M | `0x500E` ExposureProgramMode | Chip „P/S/A/M/AUTO“ |
+| Verschlusszeit | `0x500D` ExposureTime | Wert / 10 000 s |
+| Blende | `0x5007` FNumber | Wert / 100 |
+| ISO | `0x500F` ExposureIndex | |
+| Belichtungskorrektur | `0x5010` ExposureBiasCompensation | INT16, 1/1000 EV |
+| Weißabgleich | `0x5005` WhiteBalance | |
+| Messung / Antrieb / Qualität / Blitz | `0x500B` / `0x5013` / `0x5004` / `0x500C` | |
+| Akku | `0x5001` BatteryLevel | HUD oben links |
+| Restbilder | `GetStorageInfo` `0x1005` | HUD oben links |
+
+Zusätzlich: **Drittelregel-Gitter**, **Luma-Histogramm** (64 Klassen aus dem Analysebild), **Pinch-Zoom** im LiveView (Doppel-Tipp setzt zurück) und eine **Auslöserschiene** (AF / Foto / REC) am rechten Bildrand. Fehlt eine Property am Body, bleibt der Chip einfach weg – die D3400 bietet nicht alles, höhere Bodies oft mehr.
+
 **Wichtig – Autofokus beim Auslösen:** Läuft LiveView, ist der Spiegel oben und der
 Phasen-AF kann nicht arbeiten. Die App löst deshalb im LiveView grundsätzlich **ohne** AF
 aus (`0xFFFFFFFF`); die Kamera würde sonst `InvalidStatus` melden. Scharfgestellt wird
@@ -354,32 +372,38 @@ das konkrete Gerät nicht abschließend klären lässt.
 ### Der Rahmen
 
 Die Position des AF-Messfelds steht im **Vendor-Header, den Nikon dem LiveView-JPEG
-voranstellt**. Der Header ist – anders als PTP selbst – **Big-Endian**:
+voranstellt**. Der Header ist – anders als PTP selbst – **Big-Endian**. Es gibt **zwei
+Layouts** mit identischer Feldreihenfolge; das neuere hat schlicht acht Byte mehr davor.
+digiCamControl nutzt das klassische für D90/D5000/D7000/D5100 (`NikonBase`) und das
+erweiterte für D600/D800/D5200/D5300/D5500/D5600/D3300 und **D3400** (`NikonD600Base`):
 
-| Offset | Typ | Feld |
-|---|---|---|
-| 0 | u16 | Breite des LiveView-JPEGs |
-| 2 | u16 | Höhe des LiveView-JPEGs |
-| 4 | u16 | Breite des Gesamtbilds = **Koordinatenraum des AF-Felds** |
-| 6 | u16 | Höhe des Gesamtbilds |
-| 16 | u16 | Breite des AF-Rahmens |
-| 18 | u16 | Höhe des AF-Rahmens |
-| 20 | u16 | Mittelpunkt X des AF-Rahmens |
-| 22 | u16 | Mittelpunkt Y des AF-Rahmens |
-| 29 | u8 | Rotation (1 = −90°, 2 = +90°) |
-| 40 | u8 | Fokusstatus (**1 = nicht scharf**) |
-| 60 | u8 | Videoaufnahme läuft |
+| klassisch | erweitert (+8) | Typ | Feld |
+|---|---|---|---|
+| 0 | 8 | u16 | Breite des LiveView-JPEGs |
+| 2 | 10 | u16 | Höhe des LiveView-JPEGs |
+| 4 | 12 | u16 | Breite des Gesamtbilds = **Koordinatenraum des AF-Felds und von `ChangeAfArea`** |
+| 6 | 14 | u16 | Höhe des Gesamtbilds |
+| 16 | 24 | u16 | Breite des AF-Rahmens |
+| 18 | 26 | u16 | Höhe des AF-Rahmens |
+| 20 | 28 | u16 | Mittelpunkt X des AF-Rahmens |
+| 22 | 30 | u16 | Mittelpunkt Y des AF-Rahmens |
+| 29 | 37 | u8 | Rotation (1 = −90°, 2 = +90°) |
+| 40 | 48 | u8 | Fokusstatus (**1 = nicht scharf**) |
+| 60 | 68 | u8 | Videoaufnahme läuft |
 
 Die App zeichnet daraus einen Rahmen mit Eckwinkeln über das Vorschaubild:
 **grün = Kamera meldet Fokus, gelb = kein Fokus**.
 
 **Warum das nicht blind übernommen wird:** Die Headerlänge schwankt je nach Body und
-Firmware (8, 128, 384 Byte), und bei einem anderen Layout wären die gelesenen Zahlen
+Firmware (8, 64, 128, 384 Byte), und bei einem anderen Layout wären die gelesenen Zahlen
 Unsinn. Ein selbstbewusst an der falschen Stelle gezeichneter AF-Rahmen ist schlechter als
 gar keiner. Deshalb prüft der Parser jeden Header, bevor er ihm glaubt – die stärkste
-Prüfung ist, dass **Breite/Höhe auf Offset 0/2 exakt zum dekodierten JPEG passen müssen**.
-Zusätzlich müssen Rahmengröße und Mittelpunkt innerhalb des Bilds liegen. Schlägt eine
-Prüfung fehl, wird schlicht kein Rahmen gezeichnet. Fünf Unit-Tests decken das ab.
+Prüfung ist, dass **die LiveView-Breite/Höhe im Header exakt zum dekodierten JPEG passen
+muss**. Bei 384-Byte-Headern wird zuerst das erweiterte Layout probiert, sonst das
+klassische; das jeweils andere ist der Fallback. Zusätzlich müssen Rahmengröße und
+Mittelpunkt innerhalb des Bilds liegen. Schlägt alles fehl, wird schlicht kein Rahmen
+gezeichnet. Die Diagnose-Seite zeigt unter „AF-Feld / LiveView-Header", welches Layout
+erkannt wurde. Unit-Tests decken beide Layouts ab.
 
 Die Zeichenfläche berücksichtigt außerdem, dass das Bild mit `ContentScale.Fit` zentriert
 dargestellt wird: Der Rahmen wird gegen das **tatsächlich gezeichnete Bildrechteck**
@@ -409,8 +433,30 @@ andere Varianz-Skala. Die App weist im UI darauf hin.
 
 ### AF-Messfeld verschieben
 
-Tippen ins Vorschaubild sendet `Nikon_ChangeAfArea` (0x9205) mit den Koordinaten im
-Gesamtbild-Raum (Offset 4/6). Der Knopf erscheint nur, wenn die Kamera den Opcode meldet.
+Tippen oder Ziehen im Vorschaubild sendet `Nikon_ChangeAfArea` (0x9205) mit Koordinaten im
+**Gesamtbild-Raster aus dem LiveView-Header** (klassisch Offset 4/6, erweitert 12/14) –
+genau wie digiCamControl (`LiveViewViewModel.SetFocusPos` → `NikonBase.Focus(x, y)` skaliert
+mit `ImageWidth/ImageHeight`). Vor jedem `AfDrive` mit aktivem eigenem Fokusfeld passiert
+dasselbe: erst ChangeAfArea auf die Feldmitte, bei Gesichtserkennung/Motivverfolgung
+zusätzlich Umschalten auf Spot bzw. Normal (0xD05D), dann AfDrive.
+
+**Warum es vorher immer oben links scharf wurde:** Die D3400 liefert den erweiterten
+Header. Mit dem klassischen Layout gelesen stimmten JPEG-Breite/Höhe an Offset 0/2 nicht,
+also gab es keinen erkannten Header – und die App schickte Koordinaten im 640-px-JPEG-Raster
+(oder im geratenen Gesamtbild). Für ein Gesamtbild von mehreren tausend Pixeln liegt
+`(320, 212)` in der linken oberen Ecke; dort blieb das Messfeld.
+
+**Kontrolle statt Vertrauen:** Nach jedem ChangeAfArea vergleicht die App den im nächsten
+Header gemeldeten AF-Mittelpunkt mit der angeforderten Position. Weicht er um mehr als
+Feld-/Rahmenhälfte plus 6 % ab, erscheint eine Warnung mit beiden Positionen; das Ergebnis
+steht außerdem in der Diagnose. Wird der Header gar nicht erkannt, sendet die App **kein**
+ChangeAfArea (ein geratenes Raster ist schlimmer als keins), warnt einmal und lässt den
+`AfDrive` auf dem Messfeld laufen, das die Kamera gerade hat – ein normaler Autofokus.
+
+**Belichtungsprogramm:** Weder AfDrive noch ChangeAfArea noch 0xD05D hängen am Moduswahlrad;
+P, S, A und M verhalten sich identisch. Nikon sperrt die Fernsteuerung nur in AUTO, GUIDE,
+EFFECTS und den Motivprogrammen. Die Diagnose zeigt den zuletzt gelesenen Wert von 0x500E
+neben dem AF-Feld-Ergebnis, damit ein Zusammenhang sichtbar wäre, falls es doch einen gibt.
 
 ### Wenn der Videostart mit `Nikon_InvalidStatus` abgelehnt wird
 
@@ -419,19 +465,35 @@ genommen nichts Verwertbares. Die App arbeitet erst die Sequenz ab, die in
 [digiCamControl](https://github.com/dukus/digiCamControl) (`NikonBase.StartRecordMovie`)
 und libgphoto2 (`_put_Nikon_Movie`) steht, und liest danach den Kamerazustand aus:
 
+**Voraussetzung – `Nikon_GetVendorPropCodes` (0x90CA):** Nikon-Bodies führen ihre
+0xD0xx/0xD1xx-Properties **nicht** in `DeviceInfo` auf. Die D3400 meldet dort nur die
+PIMA-Standardwerte (0x5001, 0x500D, 0x500E …); `LiveViewStatus`, `RecordingMedia`,
+`ApplicationMode`, `MovRecProhibitCondition` und die AF-Properties erscheinen erst über
+0x90CA. Die App fragt den Opcode direkt nach `OpenSession` ab und mischt die Liste in die
+Geräteinfo (wie libgphoto2 in `fixup_cached_deviceinfo`). Ohne diesen Schritt zeigen alle
+Nikon-Properties in der Diagnose „n/v" und jeder property-gesteuerte Pfad – auch die
+Videostart-Sequenz unten – bleibt stumm.
+
 **Startsequenz (libgphoto2 `_put_Nikon_Movie` + Camera Connect and Control):**
 
-1. **Application-Modus an.** Die D3400 hat Property `0xD1F0` und lässt sie auf 0.
-   libgphoto2 schreibt 1, bevor 0x920A geht. Opcode `0x9435` nur, falls gemeldet.
-2. **LiveView muss laufen** (`LiveViewStatus` 0xD1A2).
-3. **`RecordingMedia` (0xD10B) auf Speicherkarte.** 0x920A ist `StartMovieRecInCard` –
-   dasselbe wie der rote Knopf am Gehäuse. Die LiveView-Startsequenz hinterlässt SDRAM;
-   dagegen antwortet die D3400 mit `InvalidStatus`.
+1. **Application-Modus an – bei ausgeschaltetem LiveView.** Die D3400 hat Property
+   `0xD1F0` und lässt sie auf 0. Nikon übernimmt den Wert nur, solange LiveView **nicht**
+   läuft; eine bereits laufende Foto-LiveView-Sitzung kann 0x920A nicht starten. Steht
+   0xD1F0 beim Druck auf REC noch auf 0, beendet die App deshalb LiveView (PC-Steuerung
+   bleibt), schreibt 1, sendet `0x9435` (falls gemeldet) und startet LiveView neu.
+2. **`RecordingMedia` (0xD10B) auf Speicherkarte.** 0x920A ist `StartMovieRecInCard` –
+   dasselbe wie der rote Knopf am Gehäuse. Der Neustart aus Schritt 1 lässt SDRAM bewusst
+   aus; dagegen antwortet die D3400 mit `InvalidStatus`.
+3. **LiveView muss laufen** (`LiveViewStatus` 0xD1A2), Events werden geleert.
 4. **`DeviceReady`, dann `0x920A` ohne Parameter und ohne Datenphase**
    (`ptp_generic_no_data(..., StartMovieRecInCard, 0)`). Das Video landet auf der SD-Karte.
-5. Nur bei `InvalidStatus` **und** wenn `LiveViewSelector` (0xD1A6) existiert: auf
-   Video-LiveView umschalten und 0x920A erneut. Die D3400 hat diese Property nicht.
+5. Bei `InvalidStatus`/`NotLiveView`: einmal LiveView im Application-Modus neu starten
+   (Schritt 1) und 0x920A wiederholen. Nur wenn `LiveViewSelector` (0xD1A6) existiert,
+   zusätzlich auf Video-LiveView umschalten. Die D3400 hat diese Property nicht.
 6. **Fallback:** `InitiateOpenCapture` (0x101C).
+
+Der Application-Modus bleibt bis zum Ende der LiveView-Sitzung aktiv (`endLiveView` setzt
+0xD1F0 zurück), damit weitere Aufnahmen keinen erneuten LiveView-Neustart brauchen.
 
 **Wenn es dann immer noch scheitert**, zeigt die App keine Vermutung mehr, sondern die
 tatsächlichen Werte – und die PTP-Diagnose klappt dafür von selbst auf:
@@ -480,6 +542,23 @@ stillschweigend.
 
 Fehlen `0xD05D` und `0xD061` in der Eigenschaftsliste, sagt die App das im Klartext; die
 Messfeldsteuerung muss dann am Kamerabody eingestellt werden.
+
+---
+
+## 7b. Intervallaufnahme und Belichtungsreihe
+
+Die D3400 hat **keinen Intervall-Timer und kein AE-Bracketing**. Beides setzt die App um:
+
+1. **Intervall.** Start-zu-Start (nicht Ende-zu-Start). Anzahl = Reihen. Pause/Fortsetzen/
+   Abbrechen. `DeviceBusy` wird kurz wiederholt, verpasste Slots werden gezählt. Ein
+   Foreground-Service (`connectedDevice`) plus WakeLock hält die Serie bei Bildschirm aus.
+2. **Bracketing.** 3/5/7 Bilder, Schritt ⅓–3 EV, Reihenfolge 0/−/+ oder −/0/+.
+   In **M** die Verschlusszeit (`0x500D`, Sekunden × 10 000), in **P/A/S** die
+   Belichtungskorrektur (`0x5010`, Tausendstel EV). AUTO/Motivprogramme werden vor dem Start
+   abgelehnt. Grenzen: 1/4000 s–30 s, Korrektur ±5 EV. Danach immer die Originalwerte
+   zurückschreiben.
+3. **Kombination.** Pro Intervall eine komplette Reihe. Anzeige „Reihen × Bilder = Fotos“.
+   Warnung, wenn Reihe oder Einzelbild länger dauert als das Intervall.
 
 ---
 
@@ -537,8 +616,10 @@ Die App bietet beides an:
   kann.
 * **Interne Videoaufnahme blockiert Fokusbefehle.** Siehe oben – wird als `DeviceBusy`
   erkannt und benannt.
-* **Kein Hintergrundbetrieb.** Die Analyse läuft, solange die App im Vordergrund ist. Der
-  Bildschirm wird per `FLAG_KEEP_SCREEN_ON` wachgehalten.
+* **Intervallaufnahme im Hintergrund.** Eine laufende Intervallserie hält den Prozess per
+  Foreground-Service und WakeLock, auch bei ausgeschaltetem Bildschirm. Wischen aus Recents
+  beendet USB und damit die Serie. Die Schärfeanalyse selbst läuft nur, solange LiveView
+  gepollt wird.
 * **Ein Score ist kein Schärfegrad in Metern.** Ein Motivwechsel (z. B. kontrastarme weiße
   Wand) senkt den Score genauso wie echte Unschärfe. Die Kombination aus Glättung,
   N-Frames-Bestätigung und Cooldown fängt das ab, aber ein Motiv völlig ohne Kontrast bleibt

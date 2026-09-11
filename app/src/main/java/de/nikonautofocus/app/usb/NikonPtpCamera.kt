@@ -171,6 +171,11 @@ data class MovieDiagnostics(
         liveViewSelector != null && liveViewSelector == PtpConstants.LIVE_VIEW_SELECTOR_STILL ->
             "LiveView steht auf Foto (0xD1A6 = 0). Nikon startet Video nur aus dem Video-LiveView."
 
+        applicationMode != null && applicationMode != 1L ->
+            "ApplicationMode (0xD1F0) steht auf $applicationMode. Die Kamera hat den Wechsel " +
+                "in den Application-Modus nicht uebernommen, obwohl LiveView dafuer beendet " +
+                "wurde - StartMovieRecInCard laeuft nur im Application-Modus."
+
         exposureProgram != null && !PtpConstants.isPsamMode(exposureProgram) ->
             "Moduswahlrad steht auf " + PtpConstants.exposureProgramName(exposureProgram) +
                 ". Nikon erlaubt Fernsteuerung in der Regel nur in P, S, A oder M."
@@ -367,8 +372,12 @@ class NikonPtpCamera(
     /**
      * Brings the camera into a state where preview frames can be pulled.
      * Follows the sequence libgphoto2 uses for Nikon bodies.
+     *
+     * @param mediaToSdram write RecordingMedia = SDRAM first (the libgphoto2 preview
+     *        default). The movie path passes false so LiveView starts with the card
+     *        already selected and no property has to be flipped mid stream.
      */
-    fun startLiveView() {
+    fun startLiveView(mediaToSdram: Boolean = true) {
         when (capabilities.frameSource) {
             FrameSource.NONE -> throw CameraException(
                 CameraError.LiveViewUnsupported(
@@ -395,7 +404,7 @@ class NikonPtpCamera(
         }
 
         // Nikon wants the recording media set to SDRAM before LiveView on many bodies.
-        if (capabilities.hasRecordingMediaProp) {
+        if (mediaToSdram && capabilities.hasRecordingMediaProp) {
             runCatching {
                 session.setDevicePropValue(
                     PtpConstants.DPC_NIKON_RECORDING_MEDIA, 1, PtpConstants.DTC_UINT8
@@ -440,6 +449,10 @@ class NikonPtpCamera(
         if (capabilities.endLiveView) {
             runCatching { session.transact(PtpConstants.OC_NIKON_END_LIVE_VIEW) }
         }
+        // ApplicationMode is only writable with LiveView off, so this is the one place
+        // where handing the body back in its normal mode is guaranteed to work.
+        waitUntilReady(intervalMs = 20, timeoutMs = 1500)
+        resetApplicationMode()
         releaseControlIfTaken()
     }
 
@@ -502,7 +515,12 @@ class NikonPtpCamera(
      * duration, which guarantees that no LiveView poll and no second AF command can overlap
      * with it. That is the core of the anti focus-pumping design.
      */
-    fun triggerAutofocus(timeoutMs: Long = 5000): AutofocusResult {
+    fun triggerAutofocus(
+        timeoutMs: Long = 5000,
+        aimX: Int? = null,
+        aimY: Int? = null,
+        aimManualField: Boolean = false
+    ): AutofocusResult {
         if (autofocusUnsupported) return AutofocusResult.Unsupported
         if (!capabilities.afDrive) {
             autofocusUnsupported = true
@@ -521,6 +539,10 @@ class NikonPtpCamera(
                 "DeviceReady meldet ${PtpConstants.responseName(readyBefore)} " +
                     "(z. B. laufende interne Videoaufnahme oder Kartenzugriff)"
             )
+        }
+
+        if (aimManualField) {
+            prepareFocusOnManualField(aimX, aimY)
         }
 
         val response = try {
@@ -636,11 +658,90 @@ class NikonPtpCamera(
         return response.responseCode
     }
 
+    // ---------------------------------------------------------------- exposure / liveview controls
+
+    /**
+     * Reads the exposure properties the body actually advertises. Missing or unreadable
+     * properties are skipped - entry-level bodies omit several of these.
+     */
+    fun readCameraControls(): List<CameraPropertyState> {
+        val result = ArrayList<CameraPropertyState>(CameraControlCatalog.SPECS.size)
+        for (spec in CameraControlCatalog.SPECS) {
+            if (!deviceInfo.hasProperty(spec.propertyCode)) continue
+            val descriptor = runCatching { session.getDevicePropDesc(spec.propertyCode) }.getOrNull()
+                ?: continue
+            result += CameraControlCatalog.fromDescriptor(spec, descriptor)
+        }
+        return result
+    }
+
+    /** Raw DevicePropDesc for a property the body actually advertises. */
+    fun readPropertyDesc(propertyCode: Int): PtpDevicePropDesc? {
+        if (!deviceInfo.hasProperty(propertyCode)) return null
+        return runCatching { session.getDevicePropDesc(propertyCode) }.getOrNull()
+    }
+
+    fun setCameraProperty(propertyCode: Int, value: Long, dataType: Int): Int {
+        if (!deviceInfo.hasProperty(propertyCode)) {
+            return PtpConstants.RC_OPERATION_NOT_SUPPORTED
+        }
+        val response = runCatching {
+            session.setDevicePropValue(propertyCode, value, dataType)
+        }.getOrNull() ?: return PtpConstants.RC_GENERAL_ERROR
+        if (response.isOk) waitUntilReady(intervalMs = 20, timeoutMs = 2000)
+        return response.responseCode
+    }
+
+    fun readBatteryPercent(): Int? {
+        if (!deviceInfo.hasProperty(PtpConstants.DPC_BATTERY_LEVEL)) return null
+        val value = runCatching {
+            session.getDevicePropValue(PtpConstants.DPC_BATTERY_LEVEL, PtpConstants.DTC_UINT8)
+        }.getOrNull() ?: return null
+        return value.toInt().coerceIn(0, 100)
+    }
+
+    /**
+     * Remaining shots / free space from the first storage that reports a usable image
+     * count. Returns null when the body has no storage info opcode or no card.
+     */
+    fun readStorageHud(): CameraStatusHud {
+        val battery = readBatteryPercent()
+        if (!deviceInfo.supports(PtpConstants.OC_GET_STORAGE_INFO) &&
+            !deviceInfo.supports(PtpConstants.OC_GET_STORAGE_IDS)
+        ) {
+            return CameraStatusHud(battery, null, null)
+        }
+        val ids = runCatching { session.getStorageIds() }.getOrDefault(emptyList())
+        var remaining: Long? = null
+        var freeBytes: Long? = null
+        for (id in ids) {
+            if (id == 0L) continue
+            val info = runCatching { session.getStorageInfo(id) }.getOrNull() ?: continue
+            if (info.freeSpaceInImages > 0L && info.freeSpaceInImages != 0xFFFFFFFFL) {
+                remaining = (remaining ?: 0L) + info.freeSpaceInImages
+            }
+            if (info.freeSpaceBytes > 0L) {
+                freeBytes = (freeBytes ?: 0L) + info.freeSpaceBytes
+            }
+        }
+        return CameraStatusHud(battery, remaining, freeBytes)
+    }
+
+    /**
+     * Last ChangeAfArea request and the camera's answer, for the diagnostics page.
+     * Null until the first attempt of the session.
+     */
+    var lastAfAreaReport: String? = null
+        private set
+
     /**
      * Moves the AF frame inside the LiveView image.
      *
-     * Coordinates are in the "whole image" space the LiveView header reports at offset
-     * 4/6, which is why the caller passes absolute pixels rather than fractions.
+     * Coordinates are in the "whole image" grid the LiveView header reports
+     * ([de.nikonautofocus.app.liveview.LiveViewHeader.imageWidth] / `imageHeight`),
+     * the same space the camera uses for its own AF frame centre. digiCamControl sends
+     * exactly this grid (`NikonBase.Focus(x, y)`). Nothing here depends on the exposure
+     * program; P, S, A and M behave the same.
      */
     fun changeAfArea(x: Int, y: Int): Int {
         if (!capabilities.changeAfArea) return PtpConstants.RC_OPERATION_NOT_SUPPORTED
@@ -648,7 +749,75 @@ class NikonPtpCamera(
         val response = runCatching {
             session.transact(PtpConstants.OC_NIKON_CHANGE_AF_AREA, intArrayOf(x, y))
         }.getOrNull() ?: return PtpConstants.RC_GENERAL_ERROR
+        lastAfAreaReport = "ChangeAfArea 0x9205 ($x, $y) -> " +
+            PtpConstants.responseName(response.responseCode)
         return response.responseCode
+    }
+
+    /**
+     * Aims LiveView AF at the user measuring field before [OC_NIKON_AF_DRIVE].
+     *
+     * Face / subject-tracking modes ignore ChangeAfArea; those are switched to Spot (or
+     * Normal) when the body exposes 0xD05D. Then the AF point is moved to [aimX], [aimY]
+     * so contrast-detect AF actually runs on that spot.
+     *
+     * Without coordinates (the header of this body could not be parsed, so the grid is
+     * unknown) nothing is touched: a plain AfDrive on the camera's own AF point is a
+     * proper autofocus, a point sent in a guessed grid is not.
+     */
+    private fun prepareFocusOnManualField(aimX: Int?, aimY: Int?) {
+        if (aimX == null || aimY == null) {
+            Log.w(TAG, "Manuelles Fokusfeld aktiv, aber Koordinatenraum unbekannt - AfDrive ohne ChangeAfArea")
+            return
+        }
+        // Move the point first so a Face->Spot switch does not sit on the default
+        // top-left until after AfDrive. Repeat after the mode change; some bodies
+        // reset the AF area when 0xD05D is written.
+        pointAfArea(aimX, aimY)
+        preferSelectableAfArea()
+        pointAfArea(aimX, aimY)
+    }
+
+    private fun pointAfArea(x: Int, y: Int) {
+        if (!capabilities.changeAfArea) {
+            Log.w(TAG, "ChangeAfArea 0x9205 fehlt - AF laeuft ohne Feldverschiebung")
+            return
+        }
+        val code = changeAfArea(x, y)
+        Log.i(TAG, "ChangeAfArea -> ($x,$y): ${PtpConstants.responseName(code)}")
+        if (code == PtpConstants.RC_OK || code == PtpConstants.RC_DEVICE_BUSY) {
+            waitUntilReady(intervalMs = 20, timeoutMs = 1500)
+        }
+    }
+
+    /**
+     * Face-priority and subject-tracking AF will not honour a user-placed point. Spot,
+     * Normal and Wide all do (they only differ in frame size), so those are left alone;
+     * otherwise Spot is preferred and Normal is the fallback when the body has no Spot.
+     */
+    private fun preferSelectableAfArea() {
+        if (!capabilities.hasAfAreaModeProp) return
+        val desc = runCatching {
+            session.getDevicePropDesc(PtpConstants.DPC_NIKON_LIVE_VIEW_AF_AREA)
+        }.getOrNull() ?: return
+        val current = desc.currentValue
+        if (current == PtpConstants.AF_AREA_SPOT ||
+            current == PtpConstants.AF_AREA_NORMAL ||
+            current == PtpConstants.AF_AREA_WIDE
+        ) {
+            return
+        }
+        val target = when {
+            desc.accepts(PtpConstants.AF_AREA_SPOT) -> PtpConstants.AF_AREA_SPOT
+            desc.accepts(PtpConstants.AF_AREA_NORMAL) -> PtpConstants.AF_AREA_NORMAL
+            else -> return
+        }
+        val code = setAfMode(PtpConstants.DPC_NIKON_LIVE_VIEW_AF_AREA, target)
+        Log.i(
+            TAG,
+            "AF-Messfeld ${PtpConstants.afAreaModeName(current)} -> " +
+                "${PtpConstants.afAreaModeName(target)}: ${PtpConstants.responseName(code)}"
+        )
     }
 
     // ---------------------------------------------------------------- still capture
@@ -837,6 +1006,10 @@ class NikonPtpCamera(
         return runCatching { session.getDevicePropValue(code, dataType) }.getOrNull()
     }
 
+    /** Mode dial position (0x500E), or null when the body does not expose it. */
+    fun readExposureProgram(): Long? =
+        readPropOrNull(PtpConstants.DPC_EXPOSURE_PROGRAM_MODE, PtpConstants.DTC_UINT16)
+
     /** Reads everything that can explain a refused movie start. */
     fun collectMovieDiagnostics(lastResponseCode: Int): MovieDiagnostics = MovieDiagnostics(
         liveViewStatus = readPropOrNull(
@@ -876,15 +1049,18 @@ class NikonPtpCamera(
      * Starts a movie recording.
      *
      * This is the libgphoto2 `_put_Nikon_Movie` / `ptp_nikon_startmovie` path
-     * (`camlibs/ptp2/config.c`, `ptp.h`): ApplicationMode on, LiveView on,
+     * (`camlibs/ptp2/config.c`, `ptp.h`): ApplicationMode on, **then** LiveView on,
      * then `PTP_OC_NIKON_StartMovieRecInCard` (0x920A) with **no parameters and no
      * data**. That opcode is the tethered equivalent of the red movie button: the
      * D3400 writes the clip to the SD card.
      *
-     * RecordingMedia is pointed at the card first, same as a still capture. The
-     * LiveView start sequence leaves it on SDRAM; sending StartMovieRec**InCard**
-     * against SDRAM is what D3400 answers with InvalidStatus. Camera Connect and
-     * Control keeps the destination on the card, which is also the camera default.
+     * The order matters. Nikon only lets a host change ApplicationMode (0xD1F0) while
+     * LiveView is off, and a LiveView session that was started in photo mode stays a
+     * photo session: 0x920A is then answered with InvalidStatus although
+     * MovRecProhibitCondition reads 0 - exactly what the D3400 (V1.13) does. So when
+     * the body is not yet in application mode, LiveView is ended, the mode is written,
+     * RecordingMedia is pointed at the card and LiveView is started again before the
+     * record opcode goes out. PC control is kept throughout.
      */
     fun startMovieRecording(): MovieResult {
         if (!capabilities.canRecordMovie && !capabilities.openCapture) {
@@ -898,10 +1074,14 @@ class NikonPtpCamera(
             return MovieResult.Failed(e.error)
         }
 
-        // libgphoto2: set 0xD1F0 and/or send 0x9435 before 0x920A. The D3400 exposes
-        // ApplicationMode (0xD1F0) and leaves it at 0 until a host writes 1.
-        enterApplicationMode()
-        waitUntilReady(intervalMs = 50, timeoutMs = 1000)
+        var restartedForApplicationMode = false
+        if (capabilities.hasApplicationModeProp && readApplicationMode() != 1L) {
+            restartedForApplicationMode = true
+            restartLiveViewInApplicationMode()
+        } else {
+            enterApplicationMode()
+            waitUntilReady(intervalMs = 50, timeoutMs = 1000)
+        }
 
         pointRecordingMediaAtCard()
         waitUntilReady(intervalMs = 50, timeoutMs = 1000)
@@ -921,6 +1101,32 @@ class NikonPtpCamera(
                 lastCode == PtpConstants.RC_NIKON_BULB_RELEASE_BUSY
             ) {
                 return MovieResult.Busy(PtpConstants.responseName(lastCode))
+            }
+
+            val refused = lastCode == PtpConstants.RC_NIKON_INVALID_STATUS ||
+                lastCode == PtpConstants.RC_NIKON_NOT_LIVE_VIEW
+
+            // Bodies with ApplicationMode that still refuse: the mode was already 1
+            // before this call (so no restart happened yet), or the write during
+            // LiveView was silently ignored. One full off/on cycle in application
+            // mode is the only way to be sure the LiveView session is a movie session.
+            if (refused && capabilities.hasApplicationModeProp && !restartedForApplicationMode) {
+                restartedForApplicationMode = true
+                restartLiveViewInApplicationMode()
+                pointRecordingMediaAtCard()
+                ensureLiveViewIsOn()
+                drainEvents()
+                lastCode = attemptNikonMovieStart()
+                if (lastCode == PtpConstants.RC_OK) {
+                    movieRecording = true
+                    movieUsesOpenCapture = false
+                    return MovieResult.Started
+                }
+                if (lastCode == PtpConstants.RC_DEVICE_BUSY ||
+                    lastCode == PtpConstants.RC_NIKON_BULB_RELEASE_BUSY
+                ) {
+                    return MovieResult.Busy(PtpConstants.responseName(lastCode))
+                }
             }
 
             // Higher-end bodies with a still/movie LiveView switch: 0x920A is refused
@@ -1000,6 +1206,64 @@ class NikonPtpCamera(
             if (lastCode != PtpConstants.RC_DEVICE_BUSY) return lastCode
         }
         return lastCode
+    }
+
+    private fun readApplicationMode(): Long? =
+        readPropOrNull(PtpConstants.DPC_NIKON_APPLICATION_MODE, PtpConstants.DTC_UINT8)
+
+    /**
+     * The Nikon SDK sequence for MovRecInCard on bodies with ApplicationMode:
+     * LiveView off -> ApplicationMode = 1 -> RecordingMedia = card -> LiveView on.
+     *
+     * Ending LiveView here keeps PC control, so the body does not fall back to its
+     * physical buttons in between. The result is logged either way; a body that
+     * refuses the write shows up as "ApplicationMode 0" in the diagnostics.
+     */
+    private fun restartLiveViewInApplicationMode() {
+        if (!capabilities.hasApplicationModeProp) return
+
+        stopLiveViewKeepingControl()
+        waitUntilLiveViewOff()
+
+        val before = readApplicationMode()
+        val response = runCatching {
+            session.setDevicePropValue(
+                PtpConstants.DPC_NIKON_APPLICATION_MODE, 1, PtpConstants.DTC_UINT8
+            )
+        }.getOrNull()
+        waitUntilReady(intervalMs = 50, timeoutMs = 1500)
+        val after = readApplicationMode()
+        Log.i(
+            TAG,
+            "ApplicationMode 0xD1F0 (LiveView aus): war $before, gesetzt 1 -> " +
+                (response?.let { PtpConstants.responseName(it.responseCode) } ?: "keine Antwort") +
+                ", jetzt $after"
+        )
+        if (capabilities.changeApplicationMode) {
+            runCatching {
+                session.transact(PtpConstants.OC_NIKON_CHANGE_APPLICATION_MODE, intArrayOf(1))
+            }
+        }
+
+        // Card first, so LiveView does not start against SDRAM and nothing has to be
+        // flipped once the stream is running.
+        if (capabilities.hasRecordingMediaProp) {
+            runCatching {
+                session.setDevicePropValue(
+                    PtpConstants.DPC_NIKON_RECORDING_MEDIA,
+                    PtpConstants.RECORDING_MEDIA_CARD,
+                    PtpConstants.DTC_UINT8
+                )
+            }
+            waitUntilReady(intervalMs = 50, timeoutMs = 1000)
+        }
+
+        try {
+            startLiveView(mediaToSdram = false)
+        } catch (e: CameraException) {
+            Log.w(TAG, "LiveView-Neustart im Application-Modus fehlgeschlagen: ${e.message}")
+        }
+        waitUntilReady(intervalMs = 20, timeoutMs = 2000)
     }
 
     /** libgphoto2 `_put_Nikon_Movie`: ApplicationMode property and/or opcode to 1. */
@@ -1178,10 +1442,11 @@ class NikonPtpCamera(
         movieUsesOpenCapture = false
 
         if (response.isOk || response.responseCode == PtpConstants.RC_NIKON_INVALID_STATUS) {
-            // The card write continues for a moment after the stop command.
+            // The card write continues for a moment after the stop command. Application
+            // mode is deliberately left on: it can only be changed with LiveView off, and
+            // keeping it saves a LiveView restart for the next clip. endLiveView() clears it.
             waitUntilReady(intervalMs = 100, timeoutMs = MOVIE_FLUSH_TIMEOUT)
             drainEvents()
-            resetApplicationMode()
             return MovieResult.Stopped
         }
 

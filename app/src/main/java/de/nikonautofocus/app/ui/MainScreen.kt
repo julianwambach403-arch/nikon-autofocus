@@ -5,7 +5,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +38,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,18 +67,26 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.BackHandler
 import de.nikonautofocus.app.AfFrameOverlay
 import de.nikonautofocus.app.FocusTargetSource
 import de.nikonautofocus.app.UiState
 import de.nikonautofocus.app.focus.FocusSettings
 import de.nikonautofocus.app.focus.FocusState
+import de.nikonautofocus.app.capture.BracketingPlan
+import de.nikonautofocus.app.capture.BracketingSettings
+import de.nikonautofocus.app.capture.IntervalPhase
+import de.nikonautofocus.app.capture.IntervalSession
 import de.nikonautofocus.app.ui.theme.Accent
 import de.nikonautofocus.app.ui.theme.BlurRed
 import de.nikonautofocus.app.ui.theme.Muted
@@ -100,13 +113,25 @@ fun MainScreen(
     onSetAppControl: (Boolean) -> Unit,
     onSetAfAreaMode: (Long) -> Unit,
     onSetAfServoMode: (Long) -> Unit,
-    onTapFocusPoint: (Float, Float) -> Unit,
+    onMoveFocusPoint: (Float, Float, Boolean) -> Unit,
     onSetFieldEnabled: (Boolean) -> Unit,
     onSetFieldSize: (Float) -> Unit,
+    onSetCameraProperty: (Int, Long, Int) -> Unit,
     onRefreshDevices: () -> Unit,
     onDismissMessages: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onStartInterval: () -> Unit,
+    onPauseInterval: () -> Unit,
+    onResumeInterval: () -> Unit,
+    onCancelInterval: () -> Unit,
+    onChangeInterval: ((FocusSettings) -> FocusSettings) -> Unit
 ) {
+    var liveViewFullscreen by remember { mutableStateOf(false) }
+    if (liveViewFullscreen) {
+        BackHandler { liveViewFullscreen = false }
+    }
+
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -147,18 +172,75 @@ fun MainScreen(
         ) {
             MessageBanners(state, onDismissMessages)
             ConnectionCard(state, onConnect, onDisconnect)
-            PreviewCard(state, preview, onTapFocusPoint)
+            PreviewCard(
+                state = state,
+                settings = settings,
+                preview = preview,
+                onMoveFocusPoint = onMoveFocusPoint,
+                onCapturePhoto = onCapturePhoto,
+                onToggleRecording = onToggleRecording,
+                onFocusNow = onFocusNow,
+                onToggleMonitoring = onToggleMonitoring,
+                onEnterFullscreen = { liveViewFullscreen = true }
+            )
+            if (settings.showExposureControls && state.connected) {
+                ExposureStrip(
+                    properties = state.cameraControls,
+                    enabled = state.appControlsCamera && !state.recording &&
+                        !state.interval.active,
+                    busy = state.cameraControlBusy,
+                    onSelect = { property, value ->
+                        onSetCameraProperty(property.propertyCode, value, property.dataType)
+                    }
+                )
+            }
             VerdictRow(state)
             AfModeCard(
                 state, settings, onSetAfAreaMode, onSetAfServoMode,
                 onSetFieldEnabled, onSetFieldSize
             )
             CaptureCard(state, onCapturePhoto, onToggleRecording, onSetAppControl)
+            IntervalCard(
+                state = state,
+                settings = settings,
+                onChange = onChangeInterval,
+                onStart = onStartInterval,
+                onPause = onPauseInterval,
+                onResume = onResumeInterval,
+                onCancel = onCancelInterval
+            )
             MetricsCard(state, settings)
             ControlsCard(state, onToggleMonitoring, onFocusNow)
             DiagnosticsCard(state)
             Spacer(Modifier.height(16.dp))
         }
+    }
+
+    if (liveViewFullscreen) {
+        // Overlay in the activity window, not a Dialog: Compose Dialogs size to their
+        // child and place it at (0, 0), so a 3:2 LiveView sat on the left of the screen.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .systemBarsPadding(),
+            contentAlignment = Alignment.Center
+        ) {
+            LiveViewStage(
+                state = state,
+                settings = settings,
+                preview = preview,
+                isFullscreen = true,
+                onMoveFocusPoint = onMoveFocusPoint,
+                onCapturePhoto = onCapturePhoto,
+                onToggleRecording = onToggleRecording,
+                onFocusNow = onFocusNow,
+                onToggleMonitoring = onToggleMonitoring,
+                onToggleFullscreen = { liveViewFullscreen = false },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
     }
 }
 
@@ -299,6 +381,115 @@ private fun fittedImageRect(
 }
 
 /**
+ * Pointer position in the LiveView box (already in the graphicsLayer local space) mapped
+ * onto the letterboxed image as 0..1. Null when the box or the image has no size.
+ */
+internal fun imageFractionFromPointer(
+    pointer: Offset,
+    boxWidth: Float,
+    boxHeight: Float,
+    imageWidth: Int,
+    imageHeight: Int
+): Offset? {
+    val rect = fittedImageRect(boxWidth, boxHeight, imageWidth, imageHeight)
+    if (rect[2] <= 0f || rect[3] <= 0f) return null
+    return Offset(
+        (pointer.x - rect[0]) / rect[2],
+        (pointer.y - rect[1]) / rect[3]
+    )
+}
+
+private suspend fun PointerInputScope.detectLiveViewGestures(
+    moveField: Boolean,
+    onFieldAt: (Offset) -> Offset?,
+    onFieldMove: (Offset) -> Unit,
+    onFieldCommit: (Offset) -> Unit,
+    onTap: (Offset) -> Unit,
+    onDoubleTap: () -> Unit,
+    onPinch: (pan: Offset, zoom: Float) -> Unit,
+    onOneFingerPan: (pan: Offset) -> Unit
+) {
+    var lastTapUptime = 0L
+    var lastTapPosition = Offset.Zero
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        var pastSlop = false
+        var multiTouch = false
+        var lastFieldFraction: Offset? = null
+        var lastPosition = Offset.Zero
+        val touchSlop = viewConfiguration.touchSlop
+        var accumulated = Offset.Zero
+
+        while (true) {
+            val event = awaitPointerEvent()
+            val pressed = event.changes.filter { it.pressed }
+            val pointerChange = event.changes.firstOrNull()
+            if (pointerChange != null) lastPosition = pointerChange.position
+            if (pressed.isEmpty()) break
+
+            if (pressed.size >= 2) {
+                multiTouch = true
+                onPinch(event.calculatePan(), event.calculateZoom())
+                event.changes.forEach { pointer ->
+                    if (pointer.positionChanged()) pointer.consume()
+                }
+                continue
+            }
+
+            if (multiTouch) {
+                event.changes.forEach { pointer ->
+                    if (pointer.positionChanged()) pointer.consume()
+                }
+                continue
+            }
+
+            val drag = pressed[0]
+            val delta = drag.position - drag.previousPosition
+            accumulated += delta
+            if (!pastSlop && accumulated.getDistance() > touchSlop) {
+                pastSlop = true
+            }
+            if (pastSlop) {
+                if (moveField) {
+                    val fraction = onFieldAt(drag.position)
+                    if (fraction != null) {
+                        val coerced = Offset(
+                            fraction.x.coerceIn(0f, 1f),
+                            fraction.y.coerceIn(0f, 1f)
+                        )
+                        lastFieldFraction = coerced
+                        onFieldMove(coerced)
+                    }
+                } else {
+                    onOneFingerPan(delta)
+                }
+                drag.consume()
+            }
+        }
+
+        if (multiTouch) return@awaitEachGesture
+        if (pastSlop) {
+            lastFieldFraction?.let(onFieldCommit)
+            return@awaitEachGesture
+        }
+
+        val up = lastPosition
+        val now = android.os.SystemClock.uptimeMillis()
+        val doubleTap = lastTapUptime != 0L &&
+            now - lastTapUptime <= viewConfiguration.doubleTapTimeoutMillis &&
+            (up - lastTapPosition).getDistance() < touchSlop * 3
+        if (doubleTap) {
+            lastTapUptime = 0L
+            onDoubleTap()
+        } else {
+            lastTapUptime = now
+            lastTapPosition = up
+            onTap(up)
+        }
+    }
+}
+
+/**
  * Draws one focus frame into the fitted image rectangle.
  *
  * @param rect    output of [fittedImageRect]: left, top, width, height
@@ -370,8 +561,14 @@ private fun DrawScope.drawFocusFrame(
 @Composable
 private fun PreviewCard(
     state: UiState,
+    settings: FocusSettings,
     preview: ImageBitmap?,
-    onTapFocusPoint: (Float, Float) -> Unit
+    onMoveFocusPoint: (Float, Float, Boolean) -> Unit,
+    onCapturePhoto: () -> Unit,
+    onToggleRecording: () -> Unit,
+    onFocusNow: () -> Unit,
+    onToggleMonitoring: () -> Unit,
+    onEnterFullscreen: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Color.Black),
@@ -382,36 +579,137 @@ private fun PreviewCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(3f / 2f)
-                .then(
-                    if (preview != null && state.canTapPreview) {
-                        Modifier.pointerInput(preview, state.canTapPreview) {
-                            detectTapGestures { offset ->
-                                val rect = fittedImageRect(
+                .clip(RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            LiveViewStage(
+                state = state,
+                settings = settings,
+                preview = preview,
+                isFullscreen = false,
+                onMoveFocusPoint = onMoveFocusPoint,
+                onCapturePhoto = onCapturePhoto,
+                onToggleRecording = onToggleRecording,
+                onFocusNow = onFocusNow,
+                onToggleMonitoring = onToggleMonitoring,
+                onToggleFullscreen = onEnterFullscreen
+            )
+        }
+    }
+}
+
+@Composable
+private fun LiveViewStage(
+    state: UiState,
+    settings: FocusSettings,
+    preview: ImageBitmap?,
+    isFullscreen: Boolean,
+    onMoveFocusPoint: (Float, Float, Boolean) -> Unit,
+    onCapturePhoto: () -> Unit,
+    onToggleRecording: () -> Unit,
+    onFocusNow: () -> Unit,
+    onToggleMonitoring: () -> Unit,
+    onToggleFullscreen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var zoomScale by remember { mutableStateOf(1f) }
+    var panX by remember { mutableStateOf(0f) }
+    var panY by remember { mutableStateOf(0f) }
+    val canMonitor = state.connected && state.focus.autofocusDisabledReason == null
+
+    Box(
+        modifier = modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        if (preview != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        translationX = panX
+                        translationY = panY
+                    }
+                    .pointerInput(
+                        preview.width,
+                        preview.height,
+                        settings.manualFieldEnabled,
+                        state.canTapPreview
+                    ) {
+                        val canMoveField = settings.manualFieldEnabled &&
+                            (state.canTapPreview || state.connected)
+                        detectLiveViewGestures(
+                            moveField = canMoveField,
+                            onFieldAt = { pointer ->
+                                imageFractionFromPointer(
+                                    pointer,
                                     size.width.toFloat(),
                                     size.height.toFloat(),
                                     preview.width,
                                     preview.height
                                 )
-                                val fx = (offset.x - rect[0]) / rect[2]
-                                val fy = (offset.y - rect[1]) / rect[3]
-                                if (fx in 0f..1f && fy in 0f..1f) onTapFocusPoint(fx, fy)
+                            },
+                            onFieldMove = { fraction ->
+                                onMoveFocusPoint(fraction.x, fraction.y, false)
+                            },
+                            onFieldCommit = { fraction ->
+                                onMoveFocusPoint(fraction.x, fraction.y, true)
+                            },
+                            onTap = { pointer ->
+                                if (state.canTapPreview) {
+                                    val fraction = imageFractionFromPointer(
+                                        pointer,
+                                        size.width.toFloat(),
+                                        size.height.toFloat(),
+                                        preview.width,
+                                        preview.height
+                                    )
+                                    if (fraction != null &&
+                                        fraction.x in 0f..1f &&
+                                        fraction.y in 0f..1f
+                                    ) {
+                                        onMoveFocusPoint(fraction.x, fraction.y, true)
+                                    }
+                                }
+                            },
+                            onDoubleTap = {
+                                zoomScale = 1f
+                                panX = 0f
+                                panY = 0f
+                            },
+                            onPinch = { pan, zoom ->
+                                val next = (zoomScale * zoom).coerceIn(1f, 5f)
+                                zoomScale = next
+                                if (next <= 1.01f) {
+                                    panX = 0f
+                                    panY = 0f
+                                } else {
+                                    panX += pan.x
+                                    panY += pan.y
+                                }
+                            },
+                            onOneFingerPan = { pan ->
+                                if (zoomScale > 1.01f) {
+                                    panX += pan.x
+                                    panY += pan.y
+                                }
                             }
-                        }
-                    } else {
-                        Modifier
+                        )
                     }
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            if (preview != null) {
-                Image(
-                    bitmap = preview,
-                    contentDescription = "LiveView",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
+            ) {
+                    Image(
+                        bitmap = preview,
+                        contentDescription = "LiveView",
+                        alignment = Alignment.Center,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
 
-                // Focus frames: what the camera reports, plus the user placed field.
+                if (settings.showGrid) {
+                    RuleOfThirdsGrid(Modifier.fillMaxSize())
+                }
+
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val rect = fittedImageRect(
                         size.width, size.height, preview.width, preview.height
@@ -428,28 +726,33 @@ private fun PreviewCard(
                         )
                     }
                 }
-            } else {
-                Text(
-                    text = when {
-                        state.connected && !state.appControlsCamera ->
-                            "LiveView aus - die Kamera wird gerade am Body bedient"
-
-                        state.connected -> "Warte auf LiveView-Bild ..."
-                        else -> "Kein LiveView"
-                    },
-                    color = Muted,
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 24.dp)
-                )
             }
+        } else {
+            Text(
+                text = when {
+                    state.connected && !state.appControlsCamera ->
+                        "LiveView aus - die Kamera wird gerade am Body bedient"
 
-            // Recording indicator
+                    state.connected -> "Warte auf LiveView-Bild ..."
+                    else -> "Kein LiveView"
+                },
+                color = Muted,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp)
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top
+        ) {
             if (state.recording) {
                 Row(
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(10.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(BlurRed.copy(alpha = 0.92f))
                         .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -471,67 +774,113 @@ private fun PreviewCard(
                     )
                 }
             }
+            FullscreenHudButton(
+                expanded = isFullscreen,
+                onClick = onToggleFullscreen
+            )
+        }
 
-            // Shutter release confirmation
-            if (state.captureFlashActive) {
+        if (state.captureFlashActive) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Accent)
+                    .padding(horizontal = 18.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = "FOTO AUSGELOEST",
+                    color = Color.Black,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+        }
+
+        if (state.autofocusFlashActive ||
+            state.focus.state == FocusState.AUTOFOCUS_TRIGGERED
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(4.dp, Accent, RoundedCornerShape(14.dp)),
+                contentAlignment = Alignment.Center
+            ) {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
                         .clip(RoundedCornerShape(10.dp))
                         .background(Accent)
                         .padding(horizontal = 18.dp, vertical = 10.dp)
                 ) {
                     Text(
-                        text = "FOTO AUSGELOEST",
+                        text = "AUTOFOCUS AKTIVIERT",
                         color = Color.Black,
                         fontWeight = FontWeight.Bold,
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
             }
+        }
 
-            // Autofocus flash
-            if (state.autofocusFlashActive ||
-                state.focus.state == FocusState.AUTOFOCUS_TRIGGERED
+        if (preview != null) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .border(4.dp, Accent, RoundedCornerShape(14.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
+                LiveViewStatusHud(state)
+                if (settings.showHistogram) {
+                    HistogramOverlay(state.histogram)
+                }
+                if (zoomScale > 1.01f) {
+                    Text(
+                        text = "%.1fx  ·  DoppelTipp setzt zurueck".format(zoomScale),
+                        color = Color.White.copy(alpha = 0.8f),
+                        style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Accent)
-                            .padding(horizontal = 18.dp, vertical = 10.dp)
-                    ) {
-                        Text(
-                            text = "AUTOFOCUS AKTIVIERT",
-                            color = Color.Black,
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                    }
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
                 }
             }
 
-            if (preview != null) {
-                Text(
-                    text = "%.1f fps  |  %s  |  %d ms  |  %d kB".format(
-                        state.fps,
-                        state.analysisResolution,
-                        state.analysisDurationMs,
-                        state.jpegSizeKb
-                    ),
-                    color = Color.White.copy(alpha = 0.75f),
-                    style = MaterialTheme.typography.labelSmall,
+            if (state.connected && state.appControlsCamera) {
+                CaptureRail(
+                    state = state,
+                    onCapturePhoto = onCapturePhoto,
+                    onToggleRecording = onToggleRecording,
+                    onFocusNow = onFocusNow,
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
+                        .align(Alignment.CenterEnd)
                         .padding(8.dp)
                 )
             }
+
+            Text(
+                text = "%.1f fps  |  %s  |  %d ms  |  %d kB".format(
+                    state.fps,
+                    state.analysisResolution,
+                    state.analysisDurationMs,
+                    state.jpegSizeKb
+                ),
+                color = Color.White.copy(alpha = 0.75f),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+            )
         }
+
+        CompactMonitoringButton(
+            monitoring = state.focus.monitoring,
+            enabled = canMonitor,
+            onClick = onToggleMonitoring,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(8.dp)
+        )
     }
 }
 
@@ -654,7 +1003,8 @@ private fun ManualFieldControls(
                 fontWeight = FontWeight.Medium
             )
             Text(
-                "Schaerfe nur im Feld messen. Tippe ins Vorschaubild, um es zu setzen. " +
+                "Schaerfe nur im Feld messen. Feld ziehen oder antippen; AF (Taste oder " +
+                    "Ueberwachung) stellt auf diese Stelle scharf. " +
                     "ACHTUNG: aendert die Skala des Schaerfewerts, Schwellwert neu einstellen.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Muted
@@ -947,6 +1297,237 @@ private fun CaptureCard(
                 onCheckedChange = { onSetAppControl(it) },
                 enabled = connected && !state.recording && !state.captureBusy
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun IntervalCard(
+    state: UiState,
+    settings: FocusSettings,
+    onChange: ((FocusSettings) -> FocusSettings) -> Unit,
+    onStart: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val session = state.interval
+    val running = session.active
+    val plan = settings.intervalPlan()
+    val canStart = state.connected && state.captureAvailable && state.appControlsCamera &&
+        !state.recording && !running && !state.captureBusy
+
+    SectionCard {
+        Text(
+            "Intervall und Belichtungsreihe",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            "Die D3400 hat keinen eigenen Intervall-Timer und kein AE-Bracketing. " +
+                "Beides macht die App, indem sie ausloest und Zeit bzw. Korrektur setzt.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+
+        Text("Intervall (Start zu Start)", style = MaterialTheme.typography.labelMedium, color = Muted)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberStepper("Std", settings.intervalHours, 0, 23, enabled = !running) {
+                onChange { s -> s.copy(intervalHours = it) }
+            }
+            NumberStepper("Min", settings.intervalMinutes, 0, 59, enabled = !running) {
+                onChange { s -> s.copy(intervalMinutes = it) }
+            }
+            NumberStepper("Sek", settings.intervalSeconds, 0, 59, enabled = !running) {
+                onChange { s -> s.copy(intervalSeconds = it) }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberStepper("Reihen", settings.intervalCount, 1, 9999, enabled = !running) {
+                onChange { s -> s.copy(intervalCount = it) }
+            }
+            NumberStepper("Delay s", settings.intervalDelaySeconds, 0, 3600, enabled = !running) {
+                onChange { s -> s.copy(intervalDelaySeconds = it) }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Belichtungsreihe", fontWeight = FontWeight.Medium)
+                Text(
+                    "Pro Intervall eine komplette Reihe. Anzahl der Reihen oben.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted
+                )
+            }
+            Switch(
+                checked = settings.bracketingEnabled,
+                onCheckedChange = { onChange { s -> s.copy(bracketingEnabled = it) } },
+                enabled = !running
+            )
+        }
+
+        if (settings.bracketingEnabled) {
+            Spacer(Modifier.height(8.dp))
+            Text("Bilder pro Reihe", style = MaterialTheme.typography.labelMedium, color = Muted)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                BracketingSettings.COUNTS.forEach { count ->
+                    FilterChip(
+                        selected = settings.bracketingCount == count,
+                        onClick = { onChange { s -> s.copy(bracketingCount = count) } },
+                        enabled = !running,
+                        label = { Text("$count") }
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Schritt " + BracketingPlan.evLabel(settings.bracketingStepThirds).removePrefix("+"),
+                style = MaterialTheme.typography.labelMedium,
+                color = Muted
+            )
+            Slider(
+                value = settings.bracketingStepThirds.toFloat(),
+                onValueChange = { onChange { s -> s.copy(bracketingStepThirds = it.toInt()) } },
+                valueRange = BracketingSettings.STEP_MIN.toFloat()..BracketingSettings.STEP_MAX.toFloat(),
+                steps = BracketingSettings.STEP_MAX - BracketingSettings.STEP_MIN - 1,
+                enabled = !running
+            )
+            Text("Reihenfolge", style = MaterialTheme.typography.labelMedium, color = Muted)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = settings.bracketingZeroFirst,
+                    onClick = { onChange { s -> s.copy(bracketingZeroFirst = true) } },
+                    enabled = !running,
+                    label = { Text("0 / − / +") }
+                )
+                FilterChip(
+                    selected = !settings.bracketingZeroFirst,
+                    onClick = { onChange { s -> s.copy(bracketingZeroFirst = false) } },
+                    enabled = !running,
+                    label = { Text("− / 0 / +") }
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = if (settings.bracketingEnabled) {
+                "${plan.shotCount} Reihen × ${plan.shotsPerSlot} = ${plan.totalPhotos} Fotos"
+            } else {
+                "${plan.shotCount} Fotos, Intervall ${IntervalSession.formatClock(plan.intervalMs)}"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium
+        )
+
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (session.phase) {
+                IntervalPhase.IDLE, IntervalPhase.FINISHED, IntervalPhase.CANCELLED, IntervalPhase.FAILED -> {
+                    Button(
+                        onClick = onStart,
+                        enabled = canStart,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
+                    ) { Text("Start", fontWeight = FontWeight.Bold) }
+                }
+                IntervalPhase.PAUSED -> {
+                    Button(
+                        onClick = onResume,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = SharpGreen, contentColor = Color.Black)
+                    ) { Text("Fortsetzen") }
+                    OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) {
+                        Text("Abbrechen")
+                    }
+                }
+                else -> {
+                    Button(
+                        onClick = onPause,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = WarnAmber, contentColor = Color.Black)
+                    ) { Text("Pause") }
+                    OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) {
+                        Text("Abbrechen")
+                    }
+                }
+            }
+        }
+
+        if (session.phase != IntervalPhase.IDLE) {
+            Spacer(Modifier.height(10.dp))
+            Text(session.progressLabel, fontWeight = FontWeight.Medium)
+            if (session.countdownMs > 0 && session.phase != IntervalPhase.PAUSED) {
+                Text(
+                    "Naechste Aufnahme in ${IntervalSession.formatClock(session.countdownMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+            if (session.etaMs > 0) {
+                Text(
+                    "Rest ca. ${IntervalSession.formatClock(session.etaMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted
+                )
+            }
+            if (session.missedSlots > 0) {
+                Text(
+                    "${session.missedSlots} verpasste Slots (Kamera beschaeftigt oder Intervall zu kurz)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WarnAmber
+                )
+            }
+            if (session.photosExpected > 0) {
+                LinearProgressIndicator(
+                    progress = { session.photosTaken.toFloat() / session.photosExpected },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+            }
+            session.log.lastOrNull()?.let {
+                Spacer(Modifier.height(6.dp))
+                Text(it, style = MaterialTheme.typography.bodySmall, color = Muted)
+            }
+        }
+    }
+}
+
+@Composable
+private fun NumberStepper(
+    label: String,
+    value: Int,
+    min: Int,
+    max: Int,
+    enabled: Boolean,
+    onChange: (Int) -> Unit
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(72.dp)) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = Muted)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(
+                onClick = { onChange((value - 1).coerceAtLeast(min)) },
+                enabled = enabled && value > min,
+                modifier = Modifier.width(28.dp)
+            ) { Text("−") }
+            Text(
+                "$value",
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(36.dp),
+                textAlign = TextAlign.Center
+            )
+            TextButton(
+                onClick = { onChange((value + 1).coerceAtMost(max)) },
+                enabled = enabled && value < max,
+                modifier = Modifier.width(28.dp)
+            ) { Text("+") }
         }
     }
 }

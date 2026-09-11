@@ -8,6 +8,7 @@ import de.nikonautofocus.app.focus.FocusState
 import de.nikonautofocus.app.focus.FocusStateMachine
 import de.nikonautofocus.app.focus.MeasuringField
 import de.nikonautofocus.app.liveview.JpegExtractor
+import de.nikonautofocus.app.liveview.LiveViewHeaderLayout
 import de.nikonautofocus.app.liveview.LiveViewHeaderParser
 import de.nikonautofocus.app.usb.MovieDiagnostics
 import de.nikonautofocus.app.usb.PtpConstants
@@ -330,7 +331,10 @@ class FocusPipelineTest {
 
     // ------------------------------------------------------------------ liveview header
 
-    /** Builds a 384 byte Nikon LiveView header with big endian fields. */
+    /**
+     * Builds a Nikon LiveView header with big endian fields. [layout] decides whether the
+     * fields start at byte 0 (D90 generation) or at byte 8 (D600 / D3400 generation).
+     */
     private fun buildHeader(
         liveViewWidth: Int = 640,
         liveViewHeight: Int = 426,
@@ -342,24 +346,27 @@ class FocusPipelineTest {
         focusY: Int = 333,
         focusByte: Int = 0,
         rotationByte: Int = 0,
-        recordingByte: Int = 0
+        recordingByte: Int = 0,
+        layout: LiveViewHeaderLayout = LiveViewHeaderLayout.CLASSIC,
+        size: Int = 384
     ): ByteArray {
-        val header = ByteArray(384)
+        val header = ByteArray(size)
+        val s = layout.shift
         fun put(offset: Int, value: Int) {
             header[offset] = ((value shr 8) and 0xFF).toByte()
             header[offset + 1] = (value and 0xFF).toByte()
         }
-        put(0, liveViewWidth)
-        put(2, liveViewHeight)
-        put(4, imageWidth)
-        put(6, imageHeight)
-        put(16, focusFrameWidth)
-        put(18, focusFrameHeight)
-        put(20, focusX)
-        put(22, focusY)
-        header[29] = rotationByte.toByte()
-        header[40] = focusByte.toByte()
-        header[60] = recordingByte.toByte()
+        put(s + 0, liveViewWidth)
+        put(s + 2, liveViewHeight)
+        put(s + 4, imageWidth)
+        put(s + 6, imageHeight)
+        put(s + 16, focusFrameWidth)
+        put(s + 18, focusFrameHeight)
+        put(s + 20, focusX)
+        put(s + 22, focusY)
+        header[s + 29] = rotationByte.toByte()
+        header[s + 40] = focusByte.toByte()
+        header[s + 60] = recordingByte.toByte()
         return header
     }
 
@@ -370,12 +377,63 @@ class FocusPipelineTest {
 
         assertNotNull(parsed)
         parsed!!
+        assertEquals(LiveViewHeaderLayout.CLASSIC, parsed.layout)
         assertEquals(1000, parsed.imageWidth)
         assertEquals(666, parsed.imageHeight)
         assertEquals(0.5f, parsed.focusCenterXFraction, 1e-4f)
         assertEquals(0.5f, parsed.focusCenterYFraction, 1e-3f)
         assertEquals(0.1f, parsed.focusWidthFraction, 1e-4f)
         assertTrue(parsed.focused)
+    }
+
+    @Test
+    fun `d3400 generation header with eight extra bytes is recognised`() {
+        // digiCamControl NikonD600Base (D600/D800/D5200/D3300/D3400): JPEG size at 8/10,
+        // whole image at 12/14, AF frame at 24..30, focus byte 48, movie byte 68.
+        val header = buildHeader(
+            layout = LiveViewHeaderLayout.EXTENDED,
+            liveViewWidth = 640,
+            liveViewHeight = 424,
+            imageWidth = 6000,
+            imageHeight = 4000,
+            focusFrameWidth = 800,
+            focusFrameHeight = 800,
+            focusX = 4500,
+            focusY = 1000,
+            focusByte = 1,
+            recordingByte = 1
+        )
+        // Something unrelated in the first eight bytes must not confuse the parser.
+        header[0] = 0x17
+        header[1] = 0x70
+        header[2] = 0x0F
+        header[3] = 0xA0.toByte()
+
+        val parsed = LiveViewHeaderParser.parse(header, 384, 640, 424)
+        assertNotNull(parsed)
+        parsed!!
+        assertEquals(LiveViewHeaderLayout.EXTENDED, parsed.layout)
+        assertEquals(6000, parsed.imageWidth)
+        assertEquals(4000, parsed.imageHeight)
+        assertEquals(0.75f, parsed.focusCenterXFraction, 1e-4f)
+        assertEquals(0.25f, parsed.focusCenterYFraction, 1e-4f)
+        assertFalse(parsed.focused)
+        assertTrue(parsed.movieRecording)
+    }
+
+    @Test
+    fun `classic layout is still accepted on a 384 byte header`() {
+        // A body with a long header but classic field order (or one where the extended
+        // read fails validation) falls back to the classic layout.
+        val parsed = LiveViewHeaderParser.parse(buildHeader(), 384, 640, 426)
+        assertEquals(LiveViewHeaderLayout.CLASSIC, parsed!!.layout)
+    }
+
+    @Test
+    fun `extended layout is also tried on shorter headers`() {
+        val header = buildHeader(layout = LiveViewHeaderLayout.EXTENDED, size = 128)
+        val parsed = LiveViewHeaderParser.parse(header, 128, 640, 426)
+        assertEquals(LiveViewHeaderLayout.EXTENDED, parsed!!.layout)
     }
 
     @Test

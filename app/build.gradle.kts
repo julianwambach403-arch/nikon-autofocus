@@ -29,8 +29,8 @@ android {
         applicationId = "de.nikonautofocus.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 9
+        versionName = "1.1.7"
     }
 
     signingConfigs {
@@ -102,4 +102,5 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.core)
 }

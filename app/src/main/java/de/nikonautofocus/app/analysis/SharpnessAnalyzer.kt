@@ -12,7 +12,9 @@ data class SharpnessResult(
     /** Wall clock cost of the measurement in milliseconds. */
     val durationMs: Long,
     /** True when only a sub region of the frame was measured. */
-    val restrictedToField: Boolean = false
+    val restrictedToField: Boolean = false,
+    /** 64-bin luma histogram of the analysed (possibly cropped) region. */
+    val histogram: IntArray = IntArray(0)
 )
 
 /**
@@ -42,6 +44,7 @@ class SharpnessAnalyzer(targetWidth: Int = DEFAULT_TARGET_WIDTH) {
 
     private var pixels: IntArray = IntArray(0)
     private var gray: IntArray = IntArray(0)
+    private var histogram: IntArray = IntArray(LumaHistogram.BINS)
 
     /**
      * @param field optional measuring field. When given, only that part of the frame is
@@ -95,8 +98,16 @@ class SharpnessAnalyzer(targetWidth: Int = DEFAULT_TARGET_WIDTH) {
         toGrayDownscaled(regionWidth, step, grayWidth, grayHeight)
 
         val score = LaplacianVariance.compute(gray, grayWidth, grayHeight)
+        LumaHistogram.compute(gray, grayWidth * grayHeight, histogram)
         val durationMs = (System.nanoTime() - started) / 1_000_000
-        return SharpnessResult(score, grayWidth, grayHeight, durationMs, field != null)
+        return SharpnessResult(
+            score = score,
+            analysisWidth = grayWidth,
+            analysisHeight = grayHeight,
+            durationMs = durationMs,
+            restrictedToField = field != null,
+            histogram = histogram.copyOf()
+        )
     }
 
     /**

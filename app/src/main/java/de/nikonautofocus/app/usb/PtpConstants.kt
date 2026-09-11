@@ -24,6 +24,7 @@ object PtpConstants {
     const val OC_OPEN_SESSION = 0x1002
     const val OC_CLOSE_SESSION = 0x1003
     const val OC_GET_STORAGE_IDS = 0x1004
+    const val OC_GET_STORAGE_INFO = 0x1005
     const val OC_INITIATE_CAPTURE = 0x100E
     const val OC_GET_DEVICE_PROP_DESC = 0x1014
     const val OC_GET_DEVICE_PROP_VALUE = 0x1015
@@ -138,6 +139,22 @@ object PtpConstants {
     const val EC_NIKON_MOVIE_RECORD_COMPLETE = 0xC108
 
     // ---------------------------------------------------------------- device properties
+    // Standard PTP properties used by tethered control apps (Camera Connect & Control,
+    // Camera Control Pro, digiCamControl). Whether a body actually exposes them is
+    // decided from DeviceInfo.DevicePropertiesSupported.
+    const val DPC_BATTERY_LEVEL = 0x5001
+    const val DPC_COMPRESSION_SETTING = 0x5004
+    const val DPC_WHITE_BALANCE = 0x5005
+    const val DPC_F_NUMBER = 0x5007
+    const val DPC_FOCAL_LENGTH = 0x5008
+    const val DPC_FOCUS_MODE = 0x500A
+    const val DPC_EXPOSURE_METERING_MODE = 0x500B
+    const val DPC_FLASH_MODE = 0x500C
+    const val DPC_EXPOSURE_TIME = 0x500D
+    const val DPC_EXPOSURE_INDEX = 0x500F
+    const val DPC_EXPOSURE_BIAS_COMPENSATION = 0x5010
+    const val DPC_STILL_CAPTURE_MODE = 0x5013
+
     /** 0 = memory card, 1 = internal SDRAM. */
     const val DPC_NIKON_RECORDING_MEDIA = 0xD10B
 
@@ -177,6 +194,12 @@ object PtpConstants {
      * for the values used here.
      */
     const val DPC_NIKON_LIVE_VIEW_AF_AREA = 0xD05D
+
+    const val AF_AREA_FACE = 0L
+    const val AF_AREA_WIDE = 1L
+    const val AF_AREA_NORMAL = 2L
+    const val AF_AREA_TRACKING = 3L
+    const val AF_AREA_SPOT = 4L
 
     /** LiveView servo mode (0 single, 1 continuous, 2 full time, 3/4 manual). */
     const val DPC_NIKON_LIVE_VIEW_AF_FOCUS = 0xD061
@@ -320,6 +343,103 @@ object PtpConstants {
         OC_NIKON_CHANGE_APPLICATION_MODE -> "Nikon_ChangeApplicationMode"
         OC_NIKON_GET_EVENT -> "Nikon_GetEvent"
         else -> hex16(code)
+    }
+
+    /**
+     * Shutter time as Nikon/PTP typically encode it: microseconds-of-a-tenth, i.e. the
+     * value is the exposure in seconds times 10_000. 10_000 = 1 s, 125 = 1/80 s.
+     * Enumerations that are not in that unit still get a readable fallback.
+     */
+    fun exposureTimeName(value: Long): String {
+        if (value <= 0L || value == 0xFFFFFFFFL || value == 0x7FFFFFFFL) return "Bulb"
+        if (value >= 10_000L) {
+            val seconds = value / 10_000.0
+            return if (seconds == seconds.toLong().toDouble()) {
+                "${seconds.toLong()}s"
+            } else {
+                "%.1fs".format(seconds)
+            }
+        }
+        val denominator = (10_000.0 / value).toInt().coerceAtLeast(1)
+        return "1/$denominator"
+    }
+
+    /** F-number is stored as aperture times 100 (560 = f/5.6). */
+    fun fNumberName(value: Long): String {
+        if (value <= 0L) return "--"
+        val aperture = value / 100.0
+        val text = if (aperture >= 10.0) "%.0f".format(aperture) else "%.1f".format(aperture)
+        return "f/$text"
+    }
+
+    /** ISO / exposure index. */
+    fun isoName(value: Long): String = if (value <= 0L) "Auto" else "ISO $value"
+
+    /**
+     * Exposure compensation in thousandths of an EV (PTP INT16). 3000 = +3.0 EV.
+     */
+    fun exposureBiasName(value: Long): String {
+        val ev = value / 1000.0
+        val sign = if (ev > 0) "+" else ""
+        return "%s%.1f EV".format(sign, ev)
+    }
+
+    fun whiteBalanceName(value: Long): String = when (value) {
+        0x0001L -> "Manuell"
+        0x0002L -> "Auto"
+        0x0003L -> "Einmalmessung"
+        0x0004L -> "Tageslicht"
+        0x0005L -> "Leuchtstoff"
+        0x0006L -> "Kunstlicht"
+        0x0007L -> "Blitz"
+        0x8010L -> "Bewoelkt"
+        0x8011L -> "Schatten"
+        0x8012L -> "Farbtemperatur"
+        0x8013L -> "Preset"
+        else -> "WB " + hex16(value.toInt())
+    }
+
+    fun meteringModeName(value: Long): String = when (value) {
+        0x0001L -> "Mittenbetont"
+        0x0002L -> "Mitte"
+        0x0003L -> "Spot"
+        0x0004L -> "Multispot"
+        0x8010L -> "Matrix"
+        0x8011L -> "Mitl. gewichtet"
+        else -> "Messung " + hex16(value.toInt())
+    }
+
+    fun stillCaptureModeName(value: Long): String = when (value) {
+        0x0001L -> "Einzelbild"
+        0x0002L -> "Serie"
+        0x0003L -> "Zeitraffer"
+        0x8010L -> "Leise"
+        0x8011L -> "Selbstausloeser"
+        0x8012L -> "Fernausloeser"
+        0x8013L -> "Spiegel oben"
+        0x8014L -> "Q (leise Serie)"
+        else -> "Antrieb " + hex16(value.toInt())
+    }
+
+    fun compressionSettingName(value: Long): String = when (value) {
+        0L -> "JPEG Fine"
+        1L -> "JPEG Normal"
+        2L -> "JPEG Basic"
+        3L -> "RAW"
+        4L -> "RAW+Fine"
+        5L -> "RAW+Normal"
+        6L -> "RAW+Basic"
+        else -> "Qualitaet $value"
+    }
+
+    fun flashModeName(value: Long): String = when (value) {
+        0x0001L -> "Auto-Blitz"
+        0x0002L -> "Aus"
+        0x0003L -> "Aufhellblitz"
+        0x0004L -> "Rote-Augen"
+        0x0005L -> "Slow-Sync"
+        0x8000L -> "Rear-Sync"
+        else -> "Blitz " + hex16(value.toInt())
     }
 
     fun hex16(value: Int): String = "0x" + value.toString(16).uppercase().padStart(4, '0')

@@ -10,18 +10,31 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import de.nikonautofocus.app.analysis.SharpnessAnalyzer
 import de.nikonautofocus.app.capture.CaptureController
+import de.nikonautofocus.app.capture.IntervalController
+import de.nikonautofocus.app.capture.IntervalSession
+import de.nikonautofocus.app.capture.IntervalSlotResult
+import de.nikonautofocus.app.capture.IntervalTiming
+import de.nikonautofocus.app.capture.BracketingController
+import de.nikonautofocus.app.capture.BracketValidation
+import de.nikonautofocus.app.capture.PreparedBracket
+import de.nikonautofocus.app.capture.IntervalSettings
+import de.nikonautofocus.app.service.IntervalCaptureService
 import de.nikonautofocus.app.focus.FocusAction
 import de.nikonautofocus.app.focus.FocusController
 import de.nikonautofocus.app.focus.FocusSettings
 import de.nikonautofocus.app.focus.FocusState
 import de.nikonautofocus.app.focus.FocusStateMachine
 import de.nikonautofocus.app.focus.FocusStatus
+import de.nikonautofocus.app.liveview.AfAreaCoordinates
+import de.nikonautofocus.app.liveview.LiveViewHeader
+import de.nikonautofocus.app.liveview.LiveViewHeaderLayout
 import de.nikonautofocus.app.liveview.LiveViewProcessor
 import de.nikonautofocus.app.settings.SettingsRepository
 import de.nikonautofocus.app.usb.AfModeState
 import de.nikonautofocus.app.usb.CameraCapabilities
 import de.nikonautofocus.app.usb.CameraError
 import de.nikonautofocus.app.usb.CameraException
+import de.nikonautofocus.app.usb.CameraPropertyState
 import de.nikonautofocus.app.usb.CaptureTarget
 import de.nikonautofocus.app.usb.FrameSource
 import de.nikonautofocus.app.usb.PtpConstants
@@ -33,8 +46,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /** Everything the screen renders. */
 data class UiState(
@@ -84,7 +99,15 @@ data class UiState(
     /** The user placed measuring field, drawn on the preview. */
     val manualField: AfFrameOverlay? = null,
     /** Where the displayed focus information comes from. */
-    val focusTargetSource: FocusTargetSource = FocusTargetSource.NONE
+    val focusTargetSource: FocusTargetSource = FocusTargetSource.NONE,
+
+    // --- Camera Connect style liveview controls ---
+    val cameraControls: List<CameraPropertyState> = emptyList(),
+    val cameraControlBusy: Boolean = false,
+    val batteryPercent: Int? = null,
+    val remainingImages: Long? = null,
+    val histogram: List<Int> = emptyList(),
+    val interval: IntervalSession = IntervalSession.idle()
 )
 
 /** What the app can actually say about where the camera is focusing. */
@@ -101,6 +124,9 @@ enum class FocusTargetSource {
     /** Not connected / no LiveView. */
     NONE
 }
+
+/** A ChangeAfArea request (image fractions) that still awaits confirmation by a header. */
+private data class PendingAfAim(val x: Float, val y: Float, val expiresAt: Long)
 
 /** AF frame position for the preview overlay, in fractions of the displayed image. */
 data class AfFrameOverlay(
@@ -119,6 +145,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val analyzer = SharpnessAnalyzer(settingsRepository.current.analysisWidth)
     private val focusController = FocusController(usbManager)
     private val captureController = CaptureController(usbManager)
+    private val bracketingController = BracketingController(usbManager, captureController)
+    private val intervalController = IntervalController()
     private val stateMachine = FocusStateMachine(settingsRepository.current)
 
     private val _uiState = MutableStateFlow(UiState(focus = stateMachine.snapshot()))
@@ -161,10 +189,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var afServoMode: AfModeState? = null
     private var lastAfImageWidth = 0
     private var lastAfImageHeight = 0
+    private var lastJpegWidth = 0
+    private var lastJpegHeight = 0
+    private var lastHeaderLayout: LiveViewHeaderLayout? = null
     private var afModeJob: Job? = null
+
+    /** Position the camera was last asked to put its AF frame at, until a header confirms. */
+    private var pendingAfAim: PendingAfAim? = null
+
+    /** Outcome of the last AF-frame verification, shown on the diagnostics page. */
+    private var afAimReport: String? = null
+    private var lastAfAreaText: String? = null
+    private var unknownAfGridWarned = false
+    private var lastExposureProgram: Long? = null
+
+    private var cameraControls: List<CameraPropertyState> = emptyList()
+    private var statusHudBattery: Int? = null
+    private var statusHudRemaining: Long? = null
+    private var histogramBins: List<Int> = emptyList()
+    private var cameraControlJob: Job? = null
 
     // Shutter release / movie recording.
     private var captureJob: Job? = null
+    private var intervalJob: Job? = null
     private var recordingTickerJob: Job? = null
     private var captureFlashUntil = 0L
     private var appControlsCamera = true
@@ -298,6 +345,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     warning = warning
                 )
                 refreshAfModes()
+                refreshCameraControls()
             } catch (e: CameraException) {
                 Log.w(TAG, "connect failed", e)
                 handleFatal(e.error)
@@ -443,34 +491,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Handles a tap on the preview. [fractionX] / [fractionY] are relative to the displayed
-     * LiveView image, 0..1.
+     * Moves the user measuring field and optionally the camera AF area.
      *
-     * Two things can happen, and both are wanted at once when available:
-     *  - the measuring field moves there, so the sharpness watchdog looks at that spot;
-     *  - the camera AF area moves there via ChangeAfArea, so the body focuses on it.
+     * [fractionX] / [fractionY] are relative to the displayed LiveView image, 0..1.
+     * During a finger drag [syncCamera] is false so SharedPreferences and ChangeAfArea
+     * are not hit on every pointer event; the last call of a gesture passes true.
      */
-    fun setAfPoint(fractionX: Float, fractionY: Float) {
-        if (!usbManager.isConnected) return
+    fun moveFocusField(fractionX: Float, fractionY: Float, syncCamera: Boolean = true) {
         val x = fractionX.coerceIn(0f, 1f)
         val y = fractionY.coerceIn(0f, 1f)
 
         if (settingsRepository.current.manualFieldEnabled) {
-            updateSettings { it.copy(manualFieldX = x, manualFieldY = y) }
+            settingsRepository.update(persist = syncCamera) {
+                it.copy(manualFieldX = x, manualFieldY = y)
+            }
+            stateMachine.updateSettings(settingsRepository.current)
+            publish()
         }
 
+        if (!syncCamera) return
+        changeCameraAfArea(x, y)
+    }
+
+    /** Tap on the preview: move the field (if on) and send ChangeAfArea. */
+    fun setAfPoint(fractionX: Float, fractionY: Float) =
+        moveFocusField(fractionX, fractionY, syncCamera = true)
+
+    private fun changeCameraAfArea(x: Float, y: Float) {
+        if (!usbManager.isConnected) return
         if (capabilities?.changeAfArea != true) return
-        if (lastAfImageWidth <= 0 || lastAfImageHeight <= 0) return
-        val pixelX = (x * lastAfImageWidth).toInt()
-        val pixelY = (y * lastAfImageHeight).toInt()
+        val aim = afAreaPixels(x, y)
+        if (aim == null) {
+            warnUnknownAfGrid()
+            return
+        }
         viewModelScope.launch {
             val code = try {
-                usbManager.withCamera { it.changeAfArea(pixelX, pixelY) }
+                usbManager.withCamera { it.changeAfArea(aim.first, aim.second) }
             } catch (e: CameraException) {
                 publish(error = e.error.message)
                 return@launch
             }
-            if (code != PtpConstants.RC_OK) {
+            lastAfAreaText = "ChangeAfArea 0x9205 (${aim.first}, ${aim.second}) -> " +
+                PtpConstants.responseName(code)
+            if (code == PtpConstants.RC_OK) {
+                expectAfFrameAt(x, y)
+            } else {
                 publish(
                     warning = "AF-Messfeld liess sich nicht verschieben: " +
                         PtpConstants.responseName(code)
@@ -478,6 +544,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    /**
+     * Pixel coordinates for ChangeAfArea in the camera's whole-image grid, taken from
+     * the last parsed LiveView header. Null while no header has been understood - then
+     * the grid is unknown and nothing may be sent (see [AfAreaCoordinates]).
+     */
+    private fun afAreaPixels(fractionX: Float, fractionY: Float): Pair<Int, Int>? =
+        AfAreaCoordinates.toAfAreaPixels(fractionX, fractionY, lastAfImageWidth, lastAfImageHeight)
+
+    private fun warnUnknownAfGrid() {
+        if (unknownAfGridWarned) return
+        unknownAfGridWarned = true
+        publish(
+            warning = "Der LiveView-Header dieser Kamera wird nicht erkannt " +
+                "($liveViewHeaderBytes Byte). Ohne ihn ist der Koordinatenraum fuer " +
+                "ChangeAfArea unbekannt; das eigene Fokusfeld wird nur in der App gemessen, " +
+                "der Autofokus laeuft auf dem AF-Messfeld der Kamera."
+        )
+    }
+
+    /** Remember where the AF frame should show up so the next header can confirm it. */
+    private fun expectAfFrameAt(fractionX: Float, fractionY: Float) {
+        pendingAfAim = PendingAfAim(
+            x = fractionX,
+            y = fractionY,
+            expiresAt = SystemClock.elapsedRealtime() + AF_AIM_CHECK_MS
+        )
+    }
+
+    /**
+     * Compares the AF frame the camera reports with the last requested position. Runs on
+     * the first parsed header after a ChangeAfArea; the outcome goes to the diagnostics
+     * and, when the camera clearly ignored the request, to the warning banner.
+     */
+    private fun verifyAfAim(header: LiveViewHeader) {
+        val aim = pendingAfAim ?: return
+        pendingAfAim = null
+        if (SystemClock.elapsedRealtime() > aim.expiresAt) return
+
+        val fieldHalf = settingsRepository.current.measuringField?.size?.div(2f) ?: 0f
+        val frameHalf = maxOf(header.focusWidthFraction, header.focusHeightFraction) / 2f
+        val tolerance = maxOf(fieldHalf, frameHalf) + AF_AIM_TOLERANCE
+        val matches = AfAreaCoordinates.reportedFrameMatches(
+            requestedX = aim.x,
+            requestedY = aim.y,
+            reportedCenterX = header.focusCenterXFraction,
+            reportedCenterY = header.focusCenterYFraction,
+            toleranceFraction = tolerance
+        )
+        val report = "Ziel ${pct(aim.x)}/${pct(aim.y)}, Kamera meldet " +
+            "${pct(header.focusCenterXFraction)}/${pct(header.focusCenterYFraction)} " +
+            "(Gesamtbild ${header.imageWidth}x${header.imageHeight}, " +
+            "Layout ${header.layout.label})"
+        afAimReport = (if (matches) "OK: " else "ABWEICHUNG: ") + report
+        if (!matches) {
+            publish(
+                warning = "Die Kamera hat das AF-Messfeld nicht dort gesetzt, wo das " +
+                    "Fokusfeld liegt ($report). Pruefe den AF-Messfeldmodus " +
+                    "(0xD05D): Gesichtserkennung und Motivverfolgung ignorieren die Vorgabe."
+            )
+        }
+    }
+
+    private fun pct(fraction: Float): String = "${(fraction * 100).roundToInt()} %"
 
     fun setManualFieldEnabled(enabled: Boolean) {
         updateSettings { it.copy(manualFieldEnabled = enabled) }
@@ -492,6 +622,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setManualFieldSize(size: Float) = updateSettings { it.copy(manualFieldSize = size) }
 
+    // ------------------------------------------------------------------ camera control properties
+
+    fun refreshCameraControls() {
+        if (!usbManager.isConnected) return
+        viewModelScope.launch {
+            runCatching {
+                usbManager.withCameraOrNull { camera ->
+                    cameraControls = camera.readCameraControls()
+                    val hud = camera.readStorageHud()
+                    statusHudBattery = hud.batteryPercent
+                    statusHudRemaining = hud.remainingImages
+                }
+            }
+            publish()
+        }
+    }
+
+    fun setCameraProperty(propertyCode: Int, value: Long, dataType: Int) {
+        if (cameraControlJob?.isActive == true) return
+        if (intervalController.session.value.active) return
+        if (!usbManager.isConnected) {
+            publish(error = CameraError.Disconnected.message)
+            return
+        }
+        cameraControlJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(cameraControlBusy = true)
+            val code = try {
+                usbManager.withCamera { it.setCameraProperty(propertyCode, value, dataType) }
+            } catch (e: CameraException) {
+                publish(error = e.error.message)
+                _uiState.value = _uiState.value.copy(cameraControlBusy = false)
+                return@launch
+            }
+            runCatching {
+                usbManager.withCameraOrNull { camera ->
+                    cameraControls = camera.readCameraControls()
+                    val hud = camera.readStorageHud()
+                    statusHudBattery = hud.batteryPercent
+                    statusHudRemaining = hud.remainingImages
+                }
+            }
+            _uiState.value = _uiState.value.copy(cameraControlBusy = false)
+            if (code == PtpConstants.RC_OK) {
+                val label = cameraControls.firstOrNull { it.propertyCode == propertyCode }
+                    ?.currentLabel ?: value.toString()
+                publish(info = "Kamera: $label")
+            } else {
+                publish(
+                    warning = "Einstellung nicht uebernommen: " +
+                        PtpConstants.responseName(code) +
+                        ". Manche Werte sind im aktuellen Belichtungsmodus gesperrt."
+                )
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ shutter and movie
 
     /**
@@ -503,7 +689,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * cooldown - the black frames right after a capture must not be read as "blurry".
      */
     fun capturePhoto() {
-        if (captureJob?.isActive == true) return
+        if (captureJob?.isActive == true || intervalController.session.value.active) return
         if (!usbManager.isConnected) {
             publish(error = CameraError.Disconnected.message)
             return
@@ -528,11 +714,138 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 lastCaptureInfo = outcome.description
             )
             publish(info = outcome.description, warning = outcome.warning)
+            refreshCameraControls()
         }
     }
 
-    fun toggleRecording() {
+    fun startIntervalSeries() {
+        if (intervalJob?.isActive == true) return
         if (captureJob?.isActive == true) return
+        if (!usbManager.isConnected) {
+            publish(error = CameraError.Disconnected.message)
+            return
+        }
+        if (!appControlsCamera) {
+            publish(warning = "Intervallaufnahme braucht die Kamerasteuerung durch die App.")
+            return
+        }
+        if (captureController.recording) {
+            publish(warning = "Waehrend einer Videoaufnahme ist keine Intervallserie moeglich.")
+            return
+        }
+        intervalJob = viewModelScope.launch {
+            val plan = settingsRepository.current.intervalPlan()
+            val prepared: PreparedBracket? = if (plan.bracketing.enabled) {
+                when (val validation = bracketingController.prepare(plan.bracketing)) {
+                    is BracketValidation.Rejected -> {
+                        publish(error = validation.reason)
+                        return@launch
+                    }
+                    is BracketValidation.Ready -> validation.plan
+                }
+            } else {
+                null
+            }
+
+            val shutterPtp = cameraControls
+                .firstOrNull { it.propertyCode == PtpConstants.DPC_EXPOSURE_TIME }
+                ?.current ?: 10_000L
+            val warnings = IntervalTiming.durationWarnings(
+                intervalMs = plan.intervalMs,
+                shutterPtp = shutterPtp,
+                saveBufferMs = IntervalSettings.DEFAULT_SAVE_BUFFER_MS,
+                bracket = prepared
+            )
+            if (warnings.isNotEmpty()) {
+                publish(warning = warnings.joinToString(" "))
+            }
+
+            val collectJob = launch {
+                intervalController.session.collect {
+                    IntervalCaptureService.startOrUpdate(getApplication(), it)
+                    publish()
+                }
+            }
+            var end = IntervalSession.idle()
+            try {
+                intervalController.run(plan) { _, missed ->
+                    shootIntervalSlot(prepared, missed)
+                }
+            } finally {
+                end = intervalController.session.value
+                collectJob.cancel()
+                IntervalCaptureService.stop(getApplication())
+                refreshCameraControls()
+                recoverLiveViewIfNeeded()
+                publish(
+                    info = end.lastMessage ?: "Intervallserie beendet",
+                    warning = if (end.missedSlots > 0) {
+                        "${end.missedSlots} Aufnahme(n) verpasst (Kamera war beschaeftigt oder das Intervall war zu kurz)."
+                    } else {
+                        KEEP
+                    }
+                )
+            }
+        }
+    }
+
+    fun pauseIntervalSeries() = intervalController.pause()
+
+    fun resumeIntervalSeries() = intervalController.resume()
+
+    fun cancelIntervalSeries() {
+        intervalController.requestCancel()
+    }
+
+    private suspend fun shootIntervalSlot(
+        prepared: PreparedBracket?,
+        missed: Boolean
+    ): IntervalSlotResult {
+        val target = if (settingsRepository.current.captureToCard) {
+            CaptureTarget.CARD
+        } else {
+            CaptureTarget.SDRAM
+        }
+        if (prepared != null) {
+            val outcome = bracketingController.shootSeries(
+                plan = prepared,
+                target = target,
+                cancelled = { intervalController.cancelling }
+            )
+            if (outcome.photos > 0) captureFlashUntil = SystemClock.elapsedRealtime() + AF_FLASH_MS
+            stateMachine.onCameraInterruption()
+            recoverLiveViewIfNeeded()
+            return IntervalSlotResult(
+                photos = outcome.photos,
+                warning = listOfNotNull(
+                    if (missed) "Slot verpasst" else null,
+                    outcome.warning
+                ).joinToString(". ").ifBlank { null }
+            )
+        }
+        val deadline = System.currentTimeMillis() + 20_000L
+        var last = captureController.capturePhoto(target)
+        while (!last.success && !last.disableCapture && System.currentTimeMillis() < deadline) {
+            val busy = last.description.contains("beschaeftigt", ignoreCase = true) ||
+                (last.warning?.contains("beschaeftigt", ignoreCase = true) == true)
+            if (!busy) break
+            kotlinx.coroutines.delay(250)
+            last = captureController.capturePhoto(target)
+        }
+        if (last.success) captureFlashUntil = SystemClock.elapsedRealtime() + AF_FLASH_MS
+        stateMachine.onCameraInterruption()
+        recoverLiveViewIfNeeded()
+        return IntervalSlotResult(
+            photos = if (last.success) 1 else 0,
+            warning = listOfNotNull(
+                if (missed) "Slot verpasst" else null,
+                last.warning ?: last.takeIf { !it.success }?.description
+            ).joinToString(". ").ifBlank { null }
+        )
+    }
+
+    fun toggleRecording() {
+        if (captureJob?.isActive == true || intervalController.session.value.active) return
         if (!usbManager.isConnected) {
             publish(error = CameraError.Disconnected.message)
             return
@@ -644,6 +957,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopRecordingTicker()
         captureJob?.cancel()
         captureJob = null
+        intervalController.requestCancel()
+        intervalJob?.cancel()
+        intervalJob = null
+        IntervalCaptureService.stop(getApplication())
+        intervalController.reset()
         afModeJob?.cancel()
         afModeJob = null
         captureController.reset()
@@ -655,6 +973,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         afServoMode = null
         lastAfImageWidth = 0
         lastAfImageHeight = 0
+        lastJpegWidth = 0
+        lastJpegHeight = 0
+        lastHeaderLayout = null
+        pendingAfAim = null
+        afAimReport = null
+        lastAfAreaText = null
+        unknownAfGridWarned = false
+        lastExposureProgram = null
+        cameraControls = emptyList()
+        statusHudBattery = null
+        statusHudRemaining = null
+        histogramBins = emptyList()
+        cameraControlJob?.cancel()
+        cameraControlJob = null
     }
 
     private fun startRecordingTicker() {
@@ -675,7 +1007,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------ settings
 
     fun updateSettings(transform: (FocusSettings) -> FocusSettings) {
-        settingsRepository.update(transform)
+        settingsRepository.update(transform = transform)
         val updated = settingsRepository.current
         stateMachine.updateSettings(updated)
         analyzer.targetWidth = updated.analysisWidth
@@ -756,6 +1088,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         consecutiveEmptyFrames = 0
         lastGoodFrameAt = SystemClock.elapsedRealtime()
 
+        lastJpegWidth = decoded.bitmap.width
+        lastJpegHeight = decoded.bitmap.height
+
         val result = analyzer.analyze(decoded.bitmap, currentSettings.measuringField)
         _preview.value = decoded.bitmap.asImageBitmap()
 
@@ -766,12 +1101,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         analysisResolution = "${result.analysisWidth}x${result.analysisHeight}"
         jpegSizeKb = decoded.jpegSize / 1024
         liveViewHeaderBytes = decoded.headerSize
+        histogramBins = if (result.histogram.isEmpty()) emptyList() else result.histogram.toList()
 
         // The AF frame the camera itself reports, converted into fractions of the frame so
         // the overlay does not have to know anything about the LiveView resolution.
         afFrame = decoded.header?.let { header ->
             lastAfImageWidth = header.imageWidth
             lastAfImageHeight = header.imageHeight
+            lastHeaderLayout = header.layout
+            verifyAfAim(header)
             AfFrameOverlay(
                 centerX = header.focusCenterXFraction,
                 centerY = header.focusCenterYFraction,
@@ -810,7 +1148,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autofocusFlashUntil = SystemClock.elapsedRealtime() + AF_FLASH_MS
         publish(info = if (manual) "Manueller Autofokus ..." else "Unschaerfe erkannt - Autofokus")
 
-        val outcome = focusController.triggerAutofocus(settingsRepository.current)
+        val settings = settingsRepository.current
+        val field = settings.measuringField
+        val aim = if (settings.manualFieldEnabled && field != null) {
+            afAreaPixels(field.centerX, field.centerY)
+        } else {
+            null
+        }
+        if (settings.manualFieldEnabled && aim == null && capabilities?.changeAfArea == true) {
+            warnUnknownAfGrid()
+        }
+        val outcome = focusController.triggerAutofocus(
+            settings = settings,
+            aimX = aim?.first,
+            aimY = aim?.second
+        )
+        if (aim != null && field != null) expectAfFrameAt(field.centerX, field.centerY)
+        if (settings.manualFieldEnabled) {
+            refreshAfModes()
+        }
+        runCatching {
+            usbManager.withCameraOrNull { camera ->
+                lastExposureProgram = camera.readExposureProgram()
+                camera.lastAfAreaReport?.let { lastAfAreaText = it }
+            }
+        }
 
         if (outcome.disableAutofocus) {
             stateMachine.onAutofocusUnsupported(outcome.warning ?: outcome.description)
@@ -883,11 +1245,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             autofocusFlashActive = SystemClock.elapsedRealtime() < autofocusFlashUntil,
             captureFlashActive = SystemClock.elapsedRealtime() < captureFlashUntil,
             scoreHistory = history.toList(),
-            diagnostics = movieDiagnosticsText?.let { movie ->
-                (diagnosticsText ?: "") + "\n--- Videostart abgelehnt ---\n" + movie
-            } ?: diagnosticsText,
+            diagnostics = assembleDiagnostics(),
             captureAvailable = capabilities?.canCaptureStill == true &&
                 !captureController.captureUnsupported,
+            captureBusy = captureJob?.isActive == true || intervalController.session.value.active,
             movieAvailable = capabilities?.canRecordMovie == true &&
                 !captureController.movieUnsupported,
             recording = captureController.recording,
@@ -911,7 +1272,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 afFrame != null -> FocusTargetSource.CAMERA_REPORTED
                 settingsRepository.current.manualFieldEnabled -> FocusTargetSource.MANUAL_FIELD
                 else -> FocusTargetSource.WHOLE_FRAME
-            }
+            },
+            cameraControls = cameraControls,
+            batteryPercent = statusHudBattery,
+            remainingImages = statusHudRemaining,
+            histogram = histogramBins,
+            interval = intervalController.session.value
         )
     }
 
@@ -939,6 +1305,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun assembleDiagnostics(): String? {
+        val base = diagnosticsText ?: return null
+        return buildString {
+            append(base)
+            afFieldDiagnostics()?.let { append("\n--- AF-Feld / LiveView-Header ---\n").append(it) }
+            movieDiagnosticsText?.let { append("\n--- Videostart abgelehnt ---\n").append(it) }
+        }
+    }
+
+    /**
+     * Everything needed to judge whether ChangeAfArea can work on this body: which header
+     * layout was recognised, the grid the camera expects, what was last sent and what the
+     * camera reported afterwards. Null before the first LiveView frame.
+     */
+    private fun afFieldDiagnostics(): String? {
+        if (lastJpegWidth <= 0) return null
+        return buildString {
+            appendLine("LiveView-JPEG: ${lastJpegWidth}x$lastJpegHeight, Header $liveViewHeaderBytes Byte")
+            appendLine(
+                "Header-Layout: " + (lastHeaderLayout?.label ?: "NICHT erkannt - AF-Rahmen und " +
+                    "ChangeAfArea-Koordinaten unbekannt")
+            )
+            if (lastAfImageWidth > 0) {
+                appendLine("Gesamtbild (Koordinatenraum 0x9205): ${lastAfImageWidth}x$lastAfImageHeight")
+            }
+            appendLine("Letztes ChangeAfArea: " + (lastAfAreaText ?: "noch keins gesendet"))
+            appendLine("Kontrolle AF-Rahmen: " + (afAimReport ?: "noch nicht geprueft"))
+            appendLine(
+                "Belichtungsprogramm 0x500E: " +
+                    (lastExposureProgram?.let { PtpConstants.exposureProgramName(it) } ?: "n/v") +
+                    " (kein Einfluss auf AfDrive/ChangeAfArea)"
+            )
+        }
+    }
+
     private fun buildDiagnostics(info: PtpDeviceInfo): String {
         val caps = capabilities
         return buildString {
@@ -949,6 +1350,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("Vendor-Extension: ${PtpConstants.hex32(info.vendorExtensionId)} " +
                 "(${info.vendorExtensionDesc})")
             appendLine("Unterstuetzte Operationen: ${info.operationsSupported.size}")
+            appendLine(
+                "Properties: ${info.devicePropertiesSupported.size} in DeviceInfo, " +
+                    "${info.vendorPropertyCodes.size} via GetVendorPropCodes 0x90CA"
+            )
             if (caps != null) {
                 appendLine("  StartLiveView  0x9201: ${yesNo(caps.startLiveView)}")
                 appendLine("  GetLiveViewImg 0x9203: ${yesNo(caps.getLiveViewImage)}")
@@ -971,9 +1376,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 appendLine("Bildquelle: ${caps.frameSource}")
                 appendLine("Fernausloesung moeglich: ${yesNo(caps.canCaptureStill)}")
                 appendLine("Videoaufnahme moeglich: ${yesNo(caps.canRecordMovie)}")
+                appendLine("  LiveViewStatus   0xD1A2: ${yesNo(caps.hasLiveViewStatusProp)}")
+                appendLine("  RecordingMedia   0xD10B: ${yesNo(caps.hasRecordingMediaProp)}")
+                appendLine("  ApplicationMode  0xD1F0: ${yesNo(caps.hasApplicationModeProp)}")
+                appendLine("  MovRecProhibit   0xD0A4: ${yesNo(caps.hasMovieProhibitProp)}")
                 appendLine("  AF-Messfeldmodus 0xD05D: ${yesNo(caps.hasAfAreaModeProp)}")
                 appendLine("  AF-Betriebsart   0xD061: ${yesNo(caps.hasAfServoModeProp)}")
                 appendLine("  AF-Feld bewegen  0x9205: ${yesNo(caps.changeAfArea)}")
+                appendLine("  BatteryLevel     0x5001: ${yesNo(info.hasProperty(PtpConstants.DPC_BATTERY_LEVEL))}")
+                appendLine("  ExposureTime     0x500D: ${yesNo(info.hasProperty(PtpConstants.DPC_EXPOSURE_TIME))}")
+                appendLine("  FNumber          0x5007: ${yesNo(info.hasProperty(PtpConstants.DPC_F_NUMBER))}")
+                appendLine("  ExposureIndex    0x500F: ${yesNo(info.hasProperty(PtpConstants.DPC_EXPOSURE_INDEX))}")
+                appendLine("  ExposureBias     0x5010: ${yesNo(info.hasProperty(PtpConstants.DPC_EXPOSURE_BIAS_COMPENSATION))}")
+                appendLine("  WhiteBalance     0x5005: ${yesNo(info.hasProperty(PtpConstants.DPC_WHITE_BALANCE))}")
+                appendLine("  GetStorageInfo   0x1005: ${yesNo(info.supports(PtpConstants.OC_GET_STORAGE_INFO))}")
             }
             appendLine("Alle Opcodes: ${info.operationsAsHex()}")
         }
@@ -985,6 +1401,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         stopFrameLoop()
         stopRecordingTicker()
+        intervalController.requestCancel()
+        IntervalCaptureService.stop(getApplication())
         usbManager.release()
     }
 
@@ -995,6 +1413,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val EMPTY_FRAME_WARNING = 25
         private const val EMPTY_FRAME_WARNING_MS = 4_000L
         private const val RECORDING_TICK_MS = 500L
+
+        /** How long a ChangeAfArea request waits for a header frame to confirm it. */
+        private const val AF_AIM_CHECK_MS = 4_000L
+
+        /** Extra slack on top of the field / frame half size, in image fractions. */
+        private const val AF_AIM_TOLERANCE = 0.06f
 
         /** Sentinel so publish() can tell "clear this banner" from "leave it alone". */
         private val KEEP = Any()

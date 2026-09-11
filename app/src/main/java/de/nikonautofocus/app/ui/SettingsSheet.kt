@@ -194,6 +194,39 @@ fun SettingsSheet(
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
+            Text(
+                "LiveView-Anzeige",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(10.dp))
+
+            SettingSwitch(
+                title = "Gitter (Drittelregel)",
+                subtitle = "Hilfslinien ueber dem LiveView, wie in Camera Connect & Control",
+                checked = settings.showGrid,
+                onCheckedChange = { checked -> onChange { it.copy(showGrid = checked) } }
+            )
+
+            SettingSwitch(
+                title = "Histogramm",
+                subtitle = "Helligkeitsverteilung des LiveView-Bildes, aktualisiert mit jedem Frame",
+                checked = settings.showHistogram,
+                onCheckedChange = { checked -> onChange { it.copy(showHistogram = checked) } }
+            )
+
+            SettingSwitch(
+                title = "Belichtungsleiste",
+                subtitle = "ISO, Zeit, Blende, Korrektur, Weissabgleich und weitere PTP-Werte " +
+                    "direkt unter dem LiveView. Nur was die Kamera anbietet, wird angezeigt.",
+                checked = settings.showExposureControls,
+                onCheckedChange = { checked ->
+                    onChange { it.copy(showExposureControls = checked) }
+                }
+            )
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)

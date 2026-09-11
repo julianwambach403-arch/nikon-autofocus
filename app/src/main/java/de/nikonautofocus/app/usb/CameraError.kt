@@ -106,9 +106,10 @@ sealed class CameraError(
                 append(" ")
             } else {
                 append(
-                    "Die Kamera meldet keine Sperrgruende - viele Einsteiger-Bodies " +
-                        "fuehren den Opcode zwar in der Liste, erlauben den Videostart " +
-                        "per USB aber nicht. "
+                    "Die Kamera meldet keine Sperrgruende, obwohl LiveView bereits im " +
+                        "Application-Modus neu gestartet wurde. Pruefe: Moduswahlrad auf " +
+                        "P/S/A/M, Speicherkarte eingelegt und nicht voll, Video-Einstellungen " +
+                        "am Body nicht auf 'manuell'. "
                 )
             }
             append("Vollstaendige Werte unter PTP-Diagnose.")

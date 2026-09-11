@@ -69,6 +69,24 @@ class PtpSession(private val transport: UsbPtpTransport) {
         return PtpDeviceInfo.parse(data, response.dataLength)
     }
 
+    /**
+     * Nikon_GetVendorPropCodes (0x90CA). Nikon DSLRs keep their 0xD0xx/0xD1xx properties
+     * out of the standard DeviceInfo and only list them through this vendor query - the
+     * same trick libgphoto2 applies in `fixup_cached_deviceinfo`. Returns an empty set when
+     * the body refuses the request.
+     */
+    fun getNikonVendorPropCodes(timeoutMs: Int = DEFAULT_TIMEOUT): Set<Int> {
+        val response = transact(
+            PtpConstants.OC_NIKON_GET_VENDOR_PROP_CODES,
+            intArrayOf(),
+            timeoutMs = timeoutMs
+        )
+        if (!response.isOk) return emptySet()
+        val data = response.data ?: return emptySet()
+        return runCatching { PtpReader(data, response.dataLength).readU16Array() }
+            .getOrDefault(emptySet())
+    }
+
     /** Reads a device property. [dataType] is one of PtpConstants.DTC_*. */
     fun getDevicePropValue(property: Int, dataType: Int, timeoutMs: Int = DEFAULT_TIMEOUT): Long {
         val response = execute(
@@ -78,11 +96,26 @@ class PtpSession(private val transport: UsbPtpTransport) {
         )
         val data = response.data ?: return 0
         val reader = PtpReader(data, response.dataLength)
-        return when (dataType) {
-            PtpConstants.DTC_UINT8 -> reader.readU8().toLong()
-            PtpConstants.DTC_UINT16 -> reader.readU16().toLong()
-            else -> reader.readU32()
-        }
+        return PtpDevicePropDesc.readScalar(reader, dataType)
+    }
+
+    fun getStorageIds(timeoutMs: Int = DEFAULT_TIMEOUT): List<Long> {
+        val response = execute(PtpConstants.OC_GET_STORAGE_IDS, timeoutMs = timeoutMs)
+        val data = response.data ?: return emptyList()
+        return PtpReader(data, response.dataLength).readU32Array()
+    }
+
+    fun getStorageInfo(storageId: Long, timeoutMs: Int = DEFAULT_TIMEOUT): PtpStorageInfo? {
+        val response = transact(
+            PtpConstants.OC_GET_STORAGE_INFO,
+            intArrayOf(storageId.toInt()),
+            timeoutMs = timeoutMs
+        )
+        if (!response.isOk) return null
+        val data = response.data ?: return null
+        return runCatching {
+            PtpStorageInfo.parse(storageId, data, response.dataLength)
+        }.getOrNull()
     }
 
     /**
@@ -108,11 +141,7 @@ class PtpSession(private val transport: UsbPtpTransport) {
         timeoutMs: Int = DEFAULT_TIMEOUT
     ): PtpResponse {
         val writer = PtpWriter(8)
-        when (dataType) {
-            PtpConstants.DTC_UINT8 -> writer.writeU8(value.toInt())
-            PtpConstants.DTC_UINT16 -> writer.writeU16(value.toInt())
-            else -> writer.writeU32(value)
-        }
+        PtpDevicePropDesc.writeScalar(writer, dataType, value)
         return transact(
             PtpConstants.OC_SET_DEVICE_PROP_VALUE,
             intArrayOf(property),

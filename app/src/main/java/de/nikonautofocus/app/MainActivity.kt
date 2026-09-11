@@ -1,13 +1,17 @@
 package de.nikonautofocus.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.core.app.ActivityCompat
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.getValue
@@ -53,12 +57,18 @@ class MainActivity : ComponentActivity() {
                     onSetAppControl = viewModel::setAppControlsCamera,
                     onSetAfAreaMode = viewModel::setAfAreaMode,
                     onSetAfServoMode = viewModel::setAfServoMode,
-                    onTapFocusPoint = viewModel::setAfPoint,
+                    onMoveFocusPoint = viewModel::moveFocusField,
                     onSetFieldEnabled = viewModel::setManualFieldEnabled,
                     onSetFieldSize = viewModel::setManualFieldSize,
+                    onSetCameraProperty = viewModel::setCameraProperty,
                     onRefreshDevices = viewModel::refreshDeviceState,
                     onDismissMessages = viewModel::dismissMessages,
-                    onOpenSettings = { settingsOpen = true }
+                    onOpenSettings = { settingsOpen = true },
+                    onStartInterval = viewModel::startIntervalSeries,
+                    onPauseInterval = viewModel::pauseIntervalSeries,
+                    onResumeInterval = viewModel::resumeIntervalSeries,
+                    onCancelInterval = viewModel::cancelIntervalSeries,
+                    onChangeInterval = { transform -> viewModel.updateSettings(transform) }
                 )
 
                 if (settingsOpen) {
@@ -74,6 +84,17 @@ class MainActivity : ComponentActivity() {
         }
 
         handleUsbIntent(intent)
+        maybeRequestNotificationPermission()
+    }
+
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -39,7 +39,11 @@ class FocusController(private val usbManager: UsbPtpManager) {
     var autofocusUnsupported: Boolean = false
         private set
 
-    suspend fun triggerAutofocus(settings: FocusSettings): AutofocusOutcome {
+    suspend fun triggerAutofocus(
+        settings: FocusSettings,
+        aimX: Int? = null,
+        aimY: Int? = null
+    ): AutofocusOutcome {
         if (autofocusUnsupported) {
             return AutofocusOutcome(
                 result = AutofocusResult.Unsupported,
@@ -52,7 +56,12 @@ class FocusController(private val usbManager: UsbPtpManager) {
 
         val result = try {
             usbManager.withCamera { camera ->
-                camera.triggerAutofocus(settings.autofocusTimeoutMs)
+                camera.triggerAutofocus(
+                    timeoutMs = settings.autofocusTimeoutMs,
+                    aimX = aimX,
+                    aimY = aimY,
+                    aimManualField = settings.manualFieldEnabled
+                )
             }
         } catch (e: CameraException) {
             AutofocusResult.Failed(e.error)
