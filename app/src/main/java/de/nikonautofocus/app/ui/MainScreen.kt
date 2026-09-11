@@ -18,10 +18,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -73,8 +72,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.activity.compose.BackHandler
 import de.nikonautofocus.app.AfFrameOverlay
 import de.nikonautofocus.app.FocusTargetSource
@@ -116,7 +113,11 @@ fun MainScreen(
     onOpenSettings: () -> Unit
 ) {
     var liveViewFullscreen by remember { mutableStateOf(false) }
+    if (liveViewFullscreen) {
+        BackHandler { liveViewFullscreen = false }
+    }
 
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -192,37 +193,30 @@ fun MainScreen(
     }
 
     if (liveViewFullscreen) {
-        Dialog(
-            onDismissRequest = { liveViewFullscreen = false },
-            properties = DialogProperties(
-                dismissOnBackPress = true,
-                dismissOnClickOutside = false,
-                usePlatformDefaultWidth = false,
-                decorFitsSystemWindows = false
-            )
+        // Overlay in the activity window, not a Dialog: Compose Dialogs size to their
+        // child and place it at (0, 0), so a 3:2 LiveView sat on the left of the screen.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .systemBarsPadding(),
+            contentAlignment = Alignment.Center
         ) {
-            BackHandler { liveViewFullscreen = false }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black)
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-            ) {
-                LiveViewStage(
-                    state = state,
-                    settings = settings,
-                    preview = preview,
-                    isFullscreen = true,
-                    onTapFocusPoint = onTapFocusPoint,
-                    onCapturePhoto = onCapturePhoto,
-                    onToggleRecording = onToggleRecording,
-                    onFocusNow = onFocusNow,
-                    onToggleMonitoring = onToggleMonitoring,
-                    onToggleFullscreen = { liveViewFullscreen = false }
-                )
-            }
+            LiveViewStage(
+                state = state,
+                settings = settings,
+                preview = preview,
+                isFullscreen = true,
+                onTapFocusPoint = onTapFocusPoint,
+                onCapturePhoto = onCapturePhoto,
+                onToggleRecording = onToggleRecording,
+                onFocusNow = onFocusNow,
+                onToggleMonitoring = onToggleMonitoring,
+                onToggleFullscreen = { liveViewFullscreen = false },
+                modifier = Modifier.fillMaxSize()
+            )
         }
+    }
     }
 }
 
@@ -482,7 +476,8 @@ private fun LiveViewStage(
     onToggleRecording: () -> Unit,
     onFocusNow: () -> Unit,
     onToggleMonitoring: () -> Unit,
-    onToggleFullscreen: () -> Unit
+    onToggleFullscreen: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var zoomScale by remember { mutableStateOf(1f) }
     var panX by remember { mutableStateOf(0f) }
@@ -490,7 +485,7 @@ private fun LiveViewStage(
     val canMonitor = state.connected && state.focus.autofocusDisabledReason == null
 
     Box(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
         if (preview != null) {
@@ -547,12 +542,13 @@ private fun LiveViewStage(
                         }
                     )
             ) {
-                Image(
-                    bitmap = preview,
-                    contentDescription = "LiveView",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
+                    Image(
+                        bitmap = preview,
+                        contentDescription = "LiveView",
+                        alignment = Alignment.Center,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
 
                 if (settings.showGrid) {
                     RuleOfThirdsGrid(Modifier.fillMaxSize())
