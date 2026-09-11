@@ -1031,6 +1031,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("Vendor-Extension: ${PtpConstants.hex32(info.vendorExtensionId)} " +
                 "(${info.vendorExtensionDesc})")
             appendLine("Unterstuetzte Operationen: ${info.operationsSupported.size}")
+            appendLine(
+                "Properties: ${info.devicePropertiesSupported.size} in DeviceInfo, " +
+                    "${info.vendorPropertyCodes.size} via GetVendorPropCodes 0x90CA"
+            )
             if (caps != null) {
                 appendLine("  StartLiveView  0x9201: ${yesNo(caps.startLiveView)}")
                 appendLine("  GetLiveViewImg 0x9203: ${yesNo(caps.getLiveViewImage)}")
@@ -1053,6 +1057,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 appendLine("Bildquelle: ${caps.frameSource}")
                 appendLine("Fernausloesung moeglich: ${yesNo(caps.canCaptureStill)}")
                 appendLine("Videoaufnahme moeglich: ${yesNo(caps.canRecordMovie)}")
+                appendLine("  LiveViewStatus   0xD1A2: ${yesNo(caps.hasLiveViewStatusProp)}")
+                appendLine("  RecordingMedia   0xD10B: ${yesNo(caps.hasRecordingMediaProp)}")
+                appendLine("  ApplicationMode  0xD1F0: ${yesNo(caps.hasApplicationModeProp)}")
+                appendLine("  MovRecProhibit   0xD0A4: ${yesNo(caps.hasMovieProhibitProp)}")
                 appendLine("  AF-Messfeldmodus 0xD05D: ${yesNo(caps.hasAfAreaModeProp)}")
                 appendLine("  AF-Betriebsart   0xD061: ${yesNo(caps.hasAfServoModeProp)}")
                 appendLine("  AF-Feld bewegen  0x9205: ${yesNo(caps.changeAfArea)}")

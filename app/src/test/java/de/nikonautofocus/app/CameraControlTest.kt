@@ -4,6 +4,7 @@ import de.nikonautofocus.app.analysis.LumaHistogram
 import de.nikonautofocus.app.usb.CameraControlCatalog
 import de.nikonautofocus.app.usb.CameraControlKind
 import de.nikonautofocus.app.usb.PtpConstants
+import de.nikonautofocus.app.usb.PtpDeviceInfo
 import de.nikonautofocus.app.usb.PtpDevicePropDesc
 import de.nikonautofocus.app.usb.PtpReader
 import de.nikonautofocus.app.usb.PtpStorageInfo
@@ -91,5 +92,39 @@ class CameraControlTest {
         val bytes = writer.toByteArray()
         val read = PtpDevicePropDesc.readScalar(PtpReader(bytes), PtpConstants.DTC_INT16)
         assertEquals(-1500L, read)
+    }
+
+    @Test
+    fun `vendor property codes from 0x90CA count as supported properties`() {
+        val info = PtpDeviceInfo(
+            standardVersion = 0x64,
+            vendorExtensionId = 6,
+            vendorExtensionVersion = 0x64,
+            vendorExtensionDesc = "Microsoft.com/DeviceServices: 1.0",
+            functionalMode = 0,
+            operationsSupported = setOf(PtpConstants.OC_NIKON_GET_VENDOR_PROP_CODES),
+            eventsSupported = emptySet(),
+            devicePropertiesSupported = setOf(PtpConstants.DPC_EXPOSURE_PROGRAM_MODE),
+            captureFormats = emptySet(),
+            imageFormats = emptySet(),
+            manufacturer = "Nikon Corporation",
+            model = "D3400",
+            deviceVersion = "V1.13",
+            serialNumber = ""
+        )
+        assertTrue(!info.hasProperty(PtpConstants.DPC_NIKON_APPLICATION_MODE))
+
+        val merged = info.withVendorPropertyCodes(
+            setOf(
+                PtpConstants.DPC_NIKON_APPLICATION_MODE,
+                PtpConstants.DPC_NIKON_LIVE_VIEW_STATUS,
+                PtpConstants.DPC_NIKON_RECORDING_MEDIA
+            )
+        )
+        assertTrue(merged.hasProperty(PtpConstants.DPC_EXPOSURE_PROGRAM_MODE))
+        assertTrue(merged.hasProperty(PtpConstants.DPC_NIKON_APPLICATION_MODE))
+        assertTrue(merged.hasProperty(PtpConstants.DPC_NIKON_LIVE_VIEW_STATUS))
+        assertTrue(merged.hasProperty(PtpConstants.DPC_NIKON_RECORDING_MEDIA))
+        assertEquals(1, merged.devicePropertiesSupported.size)
     }
 }

@@ -64,10 +64,21 @@ data class PtpDeviceInfo(
     val manufacturer: String,
     val model: String,
     val deviceVersion: String,
-    val serialNumber: String
+    val serialNumber: String,
+    /** Properties learned through Nikon_GetVendorPropCodes (0x90CA), not from DeviceInfo. */
+    val vendorPropertyCodes: Set<Int> = emptySet()
 ) {
     fun supports(operation: Int): Boolean = operationsSupported.contains(operation)
-    fun hasProperty(property: Int): Boolean = devicePropertiesSupported.contains(property)
+    fun hasProperty(property: Int): Boolean =
+        devicePropertiesSupported.contains(property) || vendorPropertyCodes.contains(property)
+
+    /**
+     * Same DeviceInfo with the vendor property list merged in. Nikon bodies such as the D3400
+     * report only the PIMA standard properties in DeviceInfo; LiveViewStatus, RecordingMedia,
+     * ApplicationMode and the AF properties become visible only through 0x90CA.
+     */
+    fun withVendorPropertyCodes(codes: Set<Int>): PtpDeviceInfo =
+        if (codes.isEmpty()) this else copy(vendorPropertyCodes = vendorPropertyCodes + codes)
 
     val isNikon: Boolean
         get() = vendorExtensionId == PtpConstants.VENDOR_EXTENSION_NIKON.toLong() ||

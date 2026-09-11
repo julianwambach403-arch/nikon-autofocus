@@ -437,6 +437,15 @@ genommen nichts Verwertbares. Die App arbeitet erst die Sequenz ab, die in
 [digiCamControl](https://github.com/dukus/digiCamControl) (`NikonBase.StartRecordMovie`)
 und libgphoto2 (`_put_Nikon_Movie`) steht, und liest danach den Kamerazustand aus:
 
+**Voraussetzung – `Nikon_GetVendorPropCodes` (0x90CA):** Nikon-Bodies führen ihre
+0xD0xx/0xD1xx-Properties **nicht** in `DeviceInfo` auf. Die D3400 meldet dort nur die
+PIMA-Standardwerte (0x5001, 0x500D, 0x500E …); `LiveViewStatus`, `RecordingMedia`,
+`ApplicationMode`, `MovRecProhibitCondition` und die AF-Properties erscheinen erst über
+0x90CA. Die App fragt den Opcode direkt nach `OpenSession` ab und mischt die Liste in die
+Geräteinfo (wie libgphoto2 in `fixup_cached_deviceinfo`). Ohne diesen Schritt zeigen alle
+Nikon-Properties in der Diagnose „n/v" und jeder property-gesteuerte Pfad – auch die
+Videostart-Sequenz unten – bleibt stumm.
+
 **Startsequenz (libgphoto2 `_put_Nikon_Movie` + Camera Connect and Control):**
 
 1. **Application-Modus an – bei ausgeschaltetem LiveView.** Die D3400 hat Property
