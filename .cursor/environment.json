@@ -1,0 +1,8 @@
+{
+  "name": "Nikon AutoFocus (Android)",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": "chmod +x gradlew && printf 'sdk.dir=%s\\n' \"$ANDROID_HOME\" > local.properties && ./gradlew --no-daemon testDebugUnitTest assembleDebug"
+}
