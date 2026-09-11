@@ -22,6 +22,7 @@ import de.nikonautofocus.app.usb.AfModeState
 import de.nikonautofocus.app.usb.CameraCapabilities
 import de.nikonautofocus.app.usb.CameraError
 import de.nikonautofocus.app.usb.CameraException
+import de.nikonautofocus.app.usb.CameraPropertyState
 import de.nikonautofocus.app.usb.CaptureTarget
 import de.nikonautofocus.app.usb.FrameSource
 import de.nikonautofocus.app.usb.PtpConstants
@@ -84,7 +85,14 @@ data class UiState(
     /** The user placed measuring field, drawn on the preview. */
     val manualField: AfFrameOverlay? = null,
     /** Where the displayed focus information comes from. */
-    val focusTargetSource: FocusTargetSource = FocusTargetSource.NONE
+    val focusTargetSource: FocusTargetSource = FocusTargetSource.NONE,
+
+    // --- Camera Connect style liveview controls ---
+    val cameraControls: List<CameraPropertyState> = emptyList(),
+    val cameraControlBusy: Boolean = false,
+    val batteryPercent: Int? = null,
+    val remainingImages: Long? = null,
+    val histogram: List<Int> = emptyList()
 )
 
 /** What the app can actually say about where the camera is focusing. */
@@ -162,6 +170,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastAfImageWidth = 0
     private var lastAfImageHeight = 0
     private var afModeJob: Job? = null
+
+    private var cameraControls: List<CameraPropertyState> = emptyList()
+    private var statusHudBattery: Int? = null
+    private var statusHudRemaining: Long? = null
+    private var histogramBins: List<Int> = emptyList()
+    private var cameraControlJob: Job? = null
 
     // Shutter release / movie recording.
     private var captureJob: Job? = null
@@ -298,6 +312,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     warning = warning
                 )
                 refreshAfModes()
+                refreshCameraControls()
             } catch (e: CameraException) {
                 Log.w(TAG, "connect failed", e)
                 handleFatal(e.error)
@@ -492,6 +507,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setManualFieldSize(size: Float) = updateSettings { it.copy(manualFieldSize = size) }
 
+    // ------------------------------------------------------------------ camera control properties
+
+    fun refreshCameraControls() {
+        if (!usbManager.isConnected) return
+        viewModelScope.launch {
+            runCatching {
+                usbManager.withCameraOrNull { camera ->
+                    cameraControls = camera.readCameraControls()
+                    val hud = camera.readStorageHud()
+                    statusHudBattery = hud.batteryPercent
+                    statusHudRemaining = hud.remainingImages
+                }
+            }
+            publish()
+        }
+    }
+
+    fun setCameraProperty(propertyCode: Int, value: Long, dataType: Int) {
+        if (cameraControlJob?.isActive == true) return
+        if (!usbManager.isConnected) {
+            publish(error = CameraError.Disconnected.message)
+            return
+        }
+        cameraControlJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(cameraControlBusy = true)
+            val code = try {
+                usbManager.withCamera { it.setCameraProperty(propertyCode, value, dataType) }
+            } catch (e: CameraException) {
+                publish(error = e.error.message)
+                _uiState.value = _uiState.value.copy(cameraControlBusy = false)
+                return@launch
+            }
+            runCatching {
+                usbManager.withCameraOrNull { camera ->
+                    cameraControls = camera.readCameraControls()
+                    val hud = camera.readStorageHud()
+                    statusHudBattery = hud.batteryPercent
+                    statusHudRemaining = hud.remainingImages
+                }
+            }
+            _uiState.value = _uiState.value.copy(cameraControlBusy = false)
+            if (code == PtpConstants.RC_OK) {
+                val label = cameraControls.firstOrNull { it.propertyCode == propertyCode }
+                    ?.currentLabel ?: value.toString()
+                publish(info = "Kamera: $label")
+            } else {
+                publish(
+                    warning = "Einstellung nicht uebernommen: " +
+                        PtpConstants.responseName(code) +
+                        ". Manche Werte sind im aktuellen Belichtungsmodus gesperrt."
+                )
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ shutter and movie
 
     /**
@@ -528,6 +598,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 lastCaptureInfo = outcome.description
             )
             publish(info = outcome.description, warning = outcome.warning)
+            refreshCameraControls()
         }
     }
 
@@ -655,6 +726,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         afServoMode = null
         lastAfImageWidth = 0
         lastAfImageHeight = 0
+        cameraControls = emptyList()
+        statusHudBattery = null
+        statusHudRemaining = null
+        histogramBins = emptyList()
+        cameraControlJob?.cancel()
+        cameraControlJob = null
     }
 
     private fun startRecordingTicker() {
@@ -766,6 +843,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         analysisResolution = "${result.analysisWidth}x${result.analysisHeight}"
         jpegSizeKb = decoded.jpegSize / 1024
         liveViewHeaderBytes = decoded.headerSize
+        histogramBins = if (result.histogram.isEmpty()) emptyList() else result.histogram.toList()
 
         // The AF frame the camera itself reports, converted into fractions of the frame so
         // the overlay does not have to know anything about the LiveView resolution.
@@ -911,7 +989,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 afFrame != null -> FocusTargetSource.CAMERA_REPORTED
                 settingsRepository.current.manualFieldEnabled -> FocusTargetSource.MANUAL_FIELD
                 else -> FocusTargetSource.WHOLE_FRAME
-            }
+            },
+            cameraControls = cameraControls,
+            batteryPercent = statusHudBattery,
+            remainingImages = statusHudRemaining,
+            histogram = histogramBins
         )
     }
 
@@ -974,6 +1056,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 appendLine("  AF-Messfeldmodus 0xD05D: ${yesNo(caps.hasAfAreaModeProp)}")
                 appendLine("  AF-Betriebsart   0xD061: ${yesNo(caps.hasAfServoModeProp)}")
                 appendLine("  AF-Feld bewegen  0x9205: ${yesNo(caps.changeAfArea)}")
+                appendLine("  BatteryLevel     0x5001: ${yesNo(info.hasProperty(PtpConstants.DPC_BATTERY_LEVEL))}")
+                appendLine("  ExposureTime     0x500D: ${yesNo(info.hasProperty(PtpConstants.DPC_EXPOSURE_TIME))}")
+                appendLine("  FNumber          0x5007: ${yesNo(info.hasProperty(PtpConstants.DPC_F_NUMBER))}")
+                appendLine("  ExposureIndex    0x500F: ${yesNo(info.hasProperty(PtpConstants.DPC_EXPOSURE_INDEX))}")
+                appendLine("  ExposureBias     0x5010: ${yesNo(info.hasProperty(PtpConstants.DPC_EXPOSURE_BIAS_COMPENSATION))}")
+                appendLine("  WhiteBalance     0x5005: ${yesNo(info.hasProperty(PtpConstants.DPC_WHITE_BALANCE))}")
+                appendLine("  GetStorageInfo   0x1005: ${yesNo(info.supports(PtpConstants.OC_GET_STORAGE_INFO))}")
             }
             appendLine("Alle Opcodes: ${info.operationsAsHex()}")
         }

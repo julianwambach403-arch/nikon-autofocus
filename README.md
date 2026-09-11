@@ -278,6 +278,24 @@ Alle Werte stammen aus dem Nikon-Vendor-Opcode-Bereich, wie er in `libgphoto2`
 | `0xD1A6` | `LiveViewSelector` (Property) | 0 Foto-LiveView, 1 Video-LiveView; vor 0x920A auf 1 gesetzt |
 | `0xD10B` | `RecordingMedia` (Property) | Vor Foto **und** Videostart auf Speicherkarte gesetzt (0x920A = roter Knopf) |
 
+### LiveView-Kamerasteuerung (Camera Connect & Control)
+
+Die App übernimmt die **guten Aspekte** der Fernsteuerungs-UI von *Camera Connect & Control* – LiveView als Arbeitsfläche, Belichtung direkt am Bild, Histogramm, Gitter, großer Auslöser – **ohne** deren APK oder Code zu verwenden. Alles läuft über die vorhandene PTP-Schicht und nur über Properties, die `DeviceInfo` der angeschlossenen Kamera wirklich auflistet.
+
+| Anzeige | PTP-Property | Anmerkung |
+|---|---|---|
+| Belichtungsmodus P/S/A/M | `0x500E` ExposureProgramMode | Chip „P/S/A/M/AUTO“ |
+| Verschlusszeit | `0x500D` ExposureTime | Wert / 10 000 s |
+| Blende | `0x5007` FNumber | Wert / 100 |
+| ISO | `0x500F` ExposureIndex | |
+| Belichtungskorrektur | `0x5010` ExposureBiasCompensation | INT16, 1/1000 EV |
+| Weißabgleich | `0x5005` WhiteBalance | |
+| Messung / Antrieb / Qualität / Blitz | `0x500B` / `0x5013` / `0x5004` / `0x500C` | |
+| Akku | `0x5001` BatteryLevel | HUD oben links |
+| Restbilder | `GetStorageInfo` `0x1005` | HUD oben links |
+
+Zusätzlich: **Drittelregel-Gitter**, **Luma-Histogramm** (64 Klassen aus dem Analysebild), **Pinch-Zoom** im LiveView (Doppel-Tipp setzt zurück) und eine **Auslöserschiene** (AF / Foto / REC) am rechten Bildrand. Fehlt eine Property am Body, bleibt der Chip einfach weg – die D3400 bietet nicht alles, höhere Bodies oft mehr.
+
 **Wichtig – Autofokus beim Auslösen:** Läuft LiveView, ist der Spiegel oben und der
 Phasen-AF kann nicht arbeiten. Die App löst deshalb im LiveView grundsätzlich **ohne** AF
 aus (`0xFFFFFFFF`); die Kamera würde sonst `InvalidStatus` melden. Scharfgestellt wird

@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,6 +63,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
@@ -103,6 +105,7 @@ fun MainScreen(
     onTapFocusPoint: (Float, Float) -> Unit,
     onSetFieldEnabled: (Boolean) -> Unit,
     onSetFieldSize: (Float) -> Unit,
+    onSetCameraProperty: (Int, Long, Int) -> Unit,
     onRefreshDevices: () -> Unit,
     onDismissMessages: () -> Unit,
     onOpenSettings: () -> Unit
@@ -147,7 +150,25 @@ fun MainScreen(
         ) {
             MessageBanners(state, onDismissMessages)
             ConnectionCard(state, onConnect, onDisconnect)
-            PreviewCard(state, preview, onTapFocusPoint)
+            PreviewCard(
+                state = state,
+                settings = settings,
+                preview = preview,
+                onTapFocusPoint = onTapFocusPoint,
+                onCapturePhoto = onCapturePhoto,
+                onToggleRecording = onToggleRecording,
+                onFocusNow = onFocusNow
+            )
+            if (settings.showExposureControls && state.connected) {
+                ExposureStrip(
+                    properties = state.cameraControls,
+                    enabled = state.appControlsCamera && !state.recording,
+                    busy = state.cameraControlBusy,
+                    onSelect = { property, value ->
+                        onSetCameraProperty(property.propertyCode, value, property.dataType)
+                    }
+                )
+            }
             VerdictRow(state)
             AfModeCard(
                 state, settings, onSetAfAreaMode, onSetAfServoMode,
@@ -370,9 +391,17 @@ private fun DrawScope.drawFocusFrame(
 @Composable
 private fun PreviewCard(
     state: UiState,
+    settings: FocusSettings,
     preview: ImageBitmap?,
-    onTapFocusPoint: (Float, Float) -> Unit
+    onTapFocusPoint: (Float, Float) -> Unit,
+    onCapturePhoto: () -> Unit,
+    onToggleRecording: () -> Unit,
+    onFocusNow: () -> Unit
 ) {
+    var zoomScale by remember { mutableStateOf(1f) }
+    var panX by remember { mutableStateOf(0f) }
+    var panY by remember { mutableStateOf(0f) }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = Color.Black),
         shape = RoundedCornerShape(14.dp),
@@ -382,50 +411,89 @@ private fun PreviewCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(3f / 2f)
-                .then(
-                    if (preview != null && state.canTapPreview) {
-                        Modifier.pointerInput(preview, state.canTapPreview) {
-                            detectTapGestures { offset ->
-                                val rect = fittedImageRect(
-                                    size.width.toFloat(),
-                                    size.height.toFloat(),
-                                    preview.width,
-                                    preview.height
-                                )
-                                val fx = (offset.x - rect[0]) / rect[2]
-                                val fy = (offset.y - rect[1]) / rect[3]
-                                if (fx in 0f..1f && fy in 0f..1f) onTapFocusPoint(fx, fy)
-                            }
-                        }
-                    } else {
-                        Modifier
-                    }
-                ),
+                .clip(RoundedCornerShape(14.dp)),
             contentAlignment = Alignment.Center
         ) {
             if (preview != null) {
-                Image(
-                    bitmap = preview,
-                    contentDescription = "LiveView",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
-
-                // Focus frames: what the camera reports, plus the user placed field.
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val rect = fittedImageRect(
-                        size.width, size.height, preview.width, preview.height
-                    )
-                    state.manualField?.let { field ->
-                        drawFocusFrame(rect, field, Accent, corners = false)
-                    }
-                    state.afFrame?.let { frame ->
-                        drawFocusFrame(
-                            rect,
-                            frame,
-                            if (frame.focused) SharpGreen else WarnAmber,
-                            corners = true
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = zoomScale
+                            scaleY = zoomScale
+                            translationX = panX
+                            translationY = panY
+                        }
+                        .pointerInput(preview, state.canTapPreview) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                val next = (zoomScale * zoom).coerceIn(1f, 5f)
+                                zoomScale = next
+                                if (next <= 1.01f) {
+                                    panX = 0f
+                                    panY = 0f
+                                } else {
+                                    panX += pan.x
+                                    panY += pan.y
+                                }
+                            }
+                        }
+                        .then(
+                            if (state.canTapPreview) {
+                                Modifier.pointerInput(preview, state.canTapPreview, zoomScale, panX, panY) {
+                                    detectTapGestures(
+                                        onDoubleTap = {
+                                            zoomScale = 1f
+                                            panX = 0f
+                                            panY = 0f
+                                        },
+                                        onTap = { offset ->
+                                            val unzoomedX = size.width / 2f +
+                                                (offset.x - size.width / 2f - panX) / zoomScale
+                                            val unzoomedY = size.height / 2f +
+                                                (offset.y - size.height / 2f - panY) / zoomScale
+                                            val rect = fittedImageRect(
+                                                size.width.toFloat(),
+                                                size.height.toFloat(),
+                                                preview.width,
+                                                preview.height
+                                            )
+                                            val fx = (unzoomedX - rect[0]) / rect[2]
+                                            val fy = (unzoomedY - rect[1]) / rect[3]
+                                            if (fx in 0f..1f && fy in 0f..1f) onTapFocusPoint(fx, fy)
+                                        }
+                                    )
+                                }
+                            } else {
+                                Modifier
+                            }
                         )
+                ) {
+                    Image(
+                        bitmap = preview,
+                        contentDescription = "LiveView",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    if (settings.showGrid) {
+                        RuleOfThirdsGrid(Modifier.fillMaxSize())
+                    }
+
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val rect = fittedImageRect(
+                            size.width, size.height, preview.width, preview.height
+                        )
+                        state.manualField?.let { field ->
+                            drawFocusFrame(rect, field, Accent, corners = false)
+                        }
+                        state.afFrame?.let { frame ->
+                            drawFocusFrame(
+                                rect,
+                                frame,
+                                if (frame.focused) SharpGreen else WarnAmber,
+                                corners = true
+                            )
+                        }
                     }
                 }
             } else {
@@ -517,6 +585,41 @@ private fun PreviewCard(
             }
 
             if (preview != null) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    LiveViewStatusHud(state)
+                    if (settings.showHistogram) {
+                        HistogramOverlay(state.histogram)
+                    }
+                    if (zoomScale > 1.01f) {
+                        Text(
+                            text = "%.1fx  ·  DoppelTipp setzt zurueck".format(zoomScale),
+                            color = Color.White.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color.Black.copy(alpha = 0.45f))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
+                if (state.connected && state.appControlsCamera) {
+                    CaptureRail(
+                        state = state,
+                        onCapturePhoto = onCapturePhoto,
+                        onToggleRecording = onToggleRecording,
+                        onFocusNow = onFocusNow,
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(8.dp)
+                    )
+                }
+
                 Text(
                     text = "%.1f fps  |  %s  |  %d ms  |  %d kB".format(
                         state.fps,
@@ -527,7 +630,7 @@ private fun PreviewCard(
                     color = Color.White.copy(alpha = 0.75f),
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
+                        .align(Alignment.BottomStart)
                         .padding(8.dp)
                 )
             }

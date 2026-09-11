@@ -636,6 +636,69 @@ class NikonPtpCamera(
         return response.responseCode
     }
 
+    // ---------------------------------------------------------------- exposure / liveview controls
+
+    /**
+     * Reads the exposure properties the body actually advertises. Missing or unreadable
+     * properties are skipped - entry-level bodies omit several of these.
+     */
+    fun readCameraControls(): List<CameraPropertyState> {
+        val result = ArrayList<CameraPropertyState>(CameraControlCatalog.SPECS.size)
+        for (spec in CameraControlCatalog.SPECS) {
+            if (!deviceInfo.hasProperty(spec.propertyCode)) continue
+            val descriptor = runCatching { session.getDevicePropDesc(spec.propertyCode) }.getOrNull()
+                ?: continue
+            result += CameraControlCatalog.fromDescriptor(spec, descriptor)
+        }
+        return result
+    }
+
+    fun setCameraProperty(propertyCode: Int, value: Long, dataType: Int): Int {
+        if (!deviceInfo.hasProperty(propertyCode)) {
+            return PtpConstants.RC_OPERATION_NOT_SUPPORTED
+        }
+        val response = runCatching {
+            session.setDevicePropValue(propertyCode, value, dataType)
+        }.getOrNull() ?: return PtpConstants.RC_GENERAL_ERROR
+        if (response.isOk) waitUntilReady(intervalMs = 20, timeoutMs = 2000)
+        return response.responseCode
+    }
+
+    fun readBatteryPercent(): Int? {
+        if (!deviceInfo.hasProperty(PtpConstants.DPC_BATTERY_LEVEL)) return null
+        val value = runCatching {
+            session.getDevicePropValue(PtpConstants.DPC_BATTERY_LEVEL, PtpConstants.DTC_UINT8)
+        }.getOrNull() ?: return null
+        return value.toInt().coerceIn(0, 100)
+    }
+
+    /**
+     * Remaining shots / free space from the first storage that reports a usable image
+     * count. Returns null when the body has no storage info opcode or no card.
+     */
+    fun readStorageHud(): CameraStatusHud {
+        val battery = readBatteryPercent()
+        if (!deviceInfo.supports(PtpConstants.OC_GET_STORAGE_INFO) &&
+            !deviceInfo.supports(PtpConstants.OC_GET_STORAGE_IDS)
+        ) {
+            return CameraStatusHud(battery, null, null)
+        }
+        val ids = runCatching { session.getStorageIds() }.getOrDefault(emptyList())
+        var remaining: Long? = null
+        var freeBytes: Long? = null
+        for (id in ids) {
+            if (id == 0L) continue
+            val info = runCatching { session.getStorageInfo(id) }.getOrNull() ?: continue
+            if (info.freeSpaceInImages > 0L && info.freeSpaceInImages != 0xFFFFFFFFL) {
+                remaining = (remaining ?: 0L) + info.freeSpaceInImages
+            }
+            if (info.freeSpaceBytes > 0L) {
+                freeBytes = (freeBytes ?: 0L) + info.freeSpaceBytes
+            }
+        }
+        return CameraStatusHud(battery, remaining, freeBytes)
+    }
+
     /**
      * Moves the AF frame inside the LiveView image.
      *

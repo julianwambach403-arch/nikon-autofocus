@@ -60,7 +60,9 @@ data class FocusSettings(
     val manualFieldY: Float = 0.5f,
 
     /** Edge length as a fraction of the frame width. The field is square in pixels. */
-    val manualFieldSize: Float = 0.35f
+    val showGrid: Boolean = true,
+    val showHistogram: Boolean = true,
+    val showExposureControls: Boolean = true
 ) {
     fun sanitized(): FocusSettings = copy(
         threshold = threshold.coerceIn(THRESHOLD_MIN, THRESHOLD_MAX),

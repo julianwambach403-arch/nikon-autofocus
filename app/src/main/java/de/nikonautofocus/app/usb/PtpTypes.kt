@@ -194,13 +194,56 @@ data class PtpDevicePropDesc(
             else -> false
         }
 
-        private fun readValue(r: PtpReader, dataType: Int): Long = when (dataType) {
+        fun readScalar(r: PtpReader, dataType: Int): Long = when (dataType) {
             PtpConstants.DTC_INT8 -> r.readU8().toByte().toLong()
             PtpConstants.DTC_UINT8 -> r.readU8().toLong()
             PtpConstants.DTC_INT16 -> r.readU16().toShort().toLong()
             PtpConstants.DTC_UINT16 -> r.readU16().toLong()
             PtpConstants.DTC_INT32 -> r.readU32().toInt().toLong()
             else -> r.readU32()
+        }
+
+        fun writeScalar(writer: PtpWriter, dataType: Int, value: Long) {
+            when (dataType) {
+                PtpConstants.DTC_INT8, PtpConstants.DTC_UINT8 -> writer.writeU8(value.toInt())
+                PtpConstants.DTC_INT16, PtpConstants.DTC_UINT16 -> writer.writeU16(value.toInt())
+                else -> writer.writeU32(value)
+            }
+        }
+
+        private fun readValue(r: PtpReader, dataType: Int): Long = readScalar(r, dataType)
+    }
+}
+
+/**
+ * PTP StorageInfo dataset (PIMA 15740, 5.5.3). Used for remaining shots and free space.
+ */
+data class PtpStorageInfo(
+    val storageId: Long,
+    val storageType: Int,
+    val maxCapacityBytes: Long,
+    val freeSpaceBytes: Long,
+    val freeSpaceInImages: Long,
+    val description: String
+) {
+    companion object {
+        fun parse(storageId: Long, data: ByteArray, length: Int): PtpStorageInfo {
+            val r = PtpReader(data, length)
+            val storageType = r.readU16()
+            r.readU16() // filesystem type
+            r.readU16() // access capability
+            val maxCapacity = r.readU64()
+            val freeBytes = r.readU64()
+            val freeImages = r.readU32()
+            val description = runCatching { r.readString() }.getOrDefault("")
+            return PtpStorageInfo(
+                storageId = storageId,
+                storageType = storageType,
+                maxCapacityBytes = maxCapacity,
+                freeSpaceBytes = freeBytes,
+                freeSpaceInImages = freeImages,
+                description = description
+            )
         }
     }
 }
@@ -238,6 +281,24 @@ class PtpReader(private val buf: ByteArray, private val limit: Int = buf.size) {
             ((buf[position + 3].toLong() and 0xFF) shl 24)
         position += 4
         return v
+    }
+
+    fun readU64(): Long {
+        val low = readU32()
+        val high = readU32()
+        return (high shl 32) or (low and 0xFFFFFFFFL)
+    }
+
+    /** AUINT32: u32 element count followed by that many u32 values. */
+    fun readU32Array(): List<Long> {
+        val count = readU32()
+        if (count <= 0 || count > 4096) {
+            if (count <= 0) return emptyList()
+            throw PtpTransportException("Implausible array length $count in PTP dataset")
+        }
+        val out = ArrayList<Long>(count.toInt())
+        for (i in 0 until count.toInt()) out.add(readU32())
+        return out
     }
 
     /** AUINT16: u32 element count followed by that many u16 values. */

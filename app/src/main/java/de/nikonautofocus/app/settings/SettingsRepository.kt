@@ -41,7 +41,12 @@ class SettingsRepository(context: Context) {
             manualFieldEnabled = prefs.getBoolean(KEY_FIELD_ON, defaults.manualFieldEnabled),
             manualFieldX = prefs.getFloat(KEY_FIELD_X, defaults.manualFieldX),
             manualFieldY = prefs.getFloat(KEY_FIELD_Y, defaults.manualFieldY),
-            manualFieldSize = prefs.getFloat(KEY_FIELD_SIZE, defaults.manualFieldSize)
+            manualFieldSize = prefs.getFloat(KEY_FIELD_SIZE, defaults.manualFieldSize),
+            showGrid = prefs.getBoolean(KEY_SHOW_GRID, defaults.showGrid),
+            showHistogram = prefs.getBoolean(KEY_SHOW_HISTOGRAM, defaults.showHistogram),
+            showExposureControls = prefs.getBoolean(
+                KEY_SHOW_EXPOSURE, defaults.showExposureControls
+            )
         ).sanitized()
     }
 
@@ -63,6 +68,9 @@ class SettingsRepository(context: Context) {
             .putFloat(KEY_FIELD_X, next.manualFieldX)
             .putFloat(KEY_FIELD_Y, next.manualFieldY)
             .putFloat(KEY_FIELD_SIZE, next.manualFieldSize)
+            .putBoolean(KEY_SHOW_GRID, next.showGrid)
+            .putBoolean(KEY_SHOW_HISTOGRAM, next.showHistogram)
+            .putBoolean(KEY_SHOW_EXPOSURE, next.showExposureControls)
             .apply()
     }
 
@@ -84,5 +92,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_FIELD_X = "manual_field_x"
         private const val KEY_FIELD_Y = "manual_field_y"
         private const val KEY_FIELD_SIZE = "manual_field_size"
+        private const val KEY_SHOW_GRID = "show_grid"
+        private const val KEY_SHOW_HISTOGRAM = "show_histogram"
+        private const val KEY_SHOW_EXPOSURE = "show_exposure_controls"
     }
 }

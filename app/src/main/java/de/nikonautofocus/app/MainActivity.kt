@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
                     onTapFocusPoint = viewModel::setAfPoint,
                     onSetFieldEnabled = viewModel::setManualFieldEnabled,
                     onSetFieldSize = viewModel::setManualFieldSize,
+                    onSetCameraProperty = viewModel::setCameraProperty,
                     onRefreshDevices = viewModel::refreshDeviceState,
                     onDismissMessages = viewModel::dismissMessages,
                     onOpenSettings = { settingsOpen = true }
