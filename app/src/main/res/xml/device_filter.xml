@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        USB Still Image Capture Device class (PIMA 15740 / PTP):
+        class 6, subclass 1, protocol 1. Every Nikon DSLR in "PTP" USB mode matches this.
+    -->
+    <usb-device class="6" subclass="1" protocol="1" />
+
+    <!-- Nikon Corporation, USB vendor id 0x04B0 = 1200 decimal. -->
+    <usb-device vendor-id="1200" />
+</resources>
