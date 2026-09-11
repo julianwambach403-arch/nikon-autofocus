@@ -36,6 +36,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -212,6 +213,76 @@ fun CaptureRail(
             content = if (state.recording) Color.Black else BlurRed,
             onClick = onToggleRecording
         )
+    }
+}
+
+@Composable
+fun CompactMonitoringButton(
+    monitoring: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val fill = if (monitoring) BlurRed else SharpGreen
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(fill.copy(alpha = if (enabled) 0.92f else 0.4f))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.55f))
+        )
+        Text(
+            text = if (monitoring) "STOPP" else "START",
+            color = Color.Black,
+            fontWeight = FontWeight.Bold,
+            fontSize = 11.sp
+        )
+    }
+}
+
+@Composable
+fun FullscreenHudButton(
+    expanded: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .size(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Black.copy(alpha = 0.5f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.size(18.dp)) {
+            val s = size.minDimension
+            val stroke = 2.2f
+            val arm = s * 0.36f
+            val color = Color.White
+            fun corner(cx: Float, cy: Float, dirX: Float, dirY: Float) {
+                drawLine(color, Offset(cx, cy), Offset(cx + dirX * arm, cy), stroke, StrokeCap.Round)
+                drawLine(color, Offset(cx, cy), Offset(cx, cy + dirY * arm), stroke, StrokeCap.Round)
+            }
+            if (expanded) {
+                corner(arm, arm, -1f, -1f)
+                corner(s - arm, arm, 1f, -1f)
+                corner(arm, s - arm, -1f, 1f)
+                corner(s - arm, s - arm, 1f, 1f)
+            } else {
+                corner(0f, 0f, 1f, 1f)
+                corner(s, 0f, -1f, 1f)
+                corner(0f, s, 1f, -1f)
+                corner(s, s, -1f, -1f)
+            }
+        }
     }
 }
 

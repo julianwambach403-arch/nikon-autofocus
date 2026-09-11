@@ -18,8 +18,10 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -71,6 +73,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.activity.compose.BackHandler
 import de.nikonautofocus.app.AfFrameOverlay
 import de.nikonautofocus.app.FocusTargetSource
 import de.nikonautofocus.app.UiState
@@ -110,6 +115,8 @@ fun MainScreen(
     onDismissMessages: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
+    var liveViewFullscreen by remember { mutableStateOf(false) }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -157,7 +164,9 @@ fun MainScreen(
                 onTapFocusPoint = onTapFocusPoint,
                 onCapturePhoto = onCapturePhoto,
                 onToggleRecording = onToggleRecording,
-                onFocusNow = onFocusNow
+                onFocusNow = onFocusNow,
+                onToggleMonitoring = onToggleMonitoring,
+                onEnterFullscreen = { liveViewFullscreen = true }
             )
             if (settings.showExposureControls && state.connected) {
                 ExposureStrip(
@@ -179,6 +188,40 @@ fun MainScreen(
             ControlsCard(state, onToggleMonitoring, onFocusNow)
             DiagnosticsCard(state)
             Spacer(Modifier.height(16.dp))
+        }
+    }
+
+    if (liveViewFullscreen) {
+        Dialog(
+            onDismissRequest = { liveViewFullscreen = false },
+            properties = DialogProperties(
+                dismissOnBackPress = true,
+                dismissOnClickOutside = false,
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
+            BackHandler { liveViewFullscreen = false }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+            ) {
+                LiveViewStage(
+                    state = state,
+                    settings = settings,
+                    preview = preview,
+                    isFullscreen = true,
+                    onTapFocusPoint = onTapFocusPoint,
+                    onCapturePhoto = onCapturePhoto,
+                    onToggleRecording = onToggleRecording,
+                    onFocusNow = onFocusNow,
+                    onToggleMonitoring = onToggleMonitoring,
+                    onToggleFullscreen = { liveViewFullscreen = false }
+                )
+            }
         }
     }
 }
@@ -396,12 +439,10 @@ private fun PreviewCard(
     onTapFocusPoint: (Float, Float) -> Unit,
     onCapturePhoto: () -> Unit,
     onToggleRecording: () -> Unit,
-    onFocusNow: () -> Unit
+    onFocusNow: () -> Unit,
+    onToggleMonitoring: () -> Unit,
+    onEnterFullscreen: () -> Unit
 ) {
-    var zoomScale by remember { mutableStateOf(1f) }
-    var panX by remember { mutableStateOf(0f) }
-    var panY by remember { mutableStateOf(0f) }
-
     Card(
         colors = CardDefaults.cardColors(containerColor = Color.Black),
         shape = RoundedCornerShape(14.dp),
@@ -414,110 +455,152 @@ private fun PreviewCard(
                 .clip(RoundedCornerShape(14.dp)),
             contentAlignment = Alignment.Center
         ) {
-            if (preview != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            scaleX = zoomScale
-                            scaleY = zoomScale
-                            translationX = panX
-                            translationY = panY
-                        }
-                        .pointerInput(preview, state.canTapPreview) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                val next = (zoomScale * zoom).coerceIn(1f, 5f)
-                                zoomScale = next
-                                if (next <= 1.01f) {
-                                    panX = 0f
-                                    panY = 0f
-                                } else {
-                                    panX += pan.x
-                                    panY += pan.y
-                                }
-                            }
-                        }
-                        .then(
-                            if (state.canTapPreview) {
-                                Modifier.pointerInput(preview, state.canTapPreview, zoomScale, panX, panY) {
-                                    detectTapGestures(
-                                        onDoubleTap = {
-                                            zoomScale = 1f
-                                            panX = 0f
-                                            panY = 0f
-                                        },
-                                        onTap = { offset ->
-                                            val unzoomedX = size.width / 2f +
-                                                (offset.x - size.width / 2f - panX) / zoomScale
-                                            val unzoomedY = size.height / 2f +
-                                                (offset.y - size.height / 2f - panY) / zoomScale
-                                            val rect = fittedImageRect(
-                                                size.width.toFloat(),
-                                                size.height.toFloat(),
-                                                preview.width,
-                                                preview.height
-                                            )
-                                            val fx = (unzoomedX - rect[0]) / rect[2]
-                                            val fy = (unzoomedY - rect[1]) / rect[3]
-                                            if (fx in 0f..1f && fy in 0f..1f) onTapFocusPoint(fx, fy)
-                                        }
-                                    )
-                                }
-                            } else {
-                                Modifier
-                            }
-                        )
-                ) {
-                    Image(
-                        bitmap = preview,
-                        contentDescription = "LiveView",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize()
-                    )
+            LiveViewStage(
+                state = state,
+                settings = settings,
+                preview = preview,
+                isFullscreen = false,
+                onTapFocusPoint = onTapFocusPoint,
+                onCapturePhoto = onCapturePhoto,
+                onToggleRecording = onToggleRecording,
+                onFocusNow = onFocusNow,
+                onToggleMonitoring = onToggleMonitoring,
+                onToggleFullscreen = onEnterFullscreen
+            )
+        }
+    }
+}
 
-                    if (settings.showGrid) {
-                        RuleOfThirdsGrid(Modifier.fillMaxSize())
+@Composable
+private fun LiveViewStage(
+    state: UiState,
+    settings: FocusSettings,
+    preview: ImageBitmap?,
+    isFullscreen: Boolean,
+    onTapFocusPoint: (Float, Float) -> Unit,
+    onCapturePhoto: () -> Unit,
+    onToggleRecording: () -> Unit,
+    onFocusNow: () -> Unit,
+    onToggleMonitoring: () -> Unit,
+    onToggleFullscreen: () -> Unit
+) {
+    var zoomScale by remember { mutableStateOf(1f) }
+    var panX by remember { mutableStateOf(0f) }
+    var panY by remember { mutableStateOf(0f) }
+    val canMonitor = state.connected && state.focus.autofocusDisabledReason == null
+
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        if (preview != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        translationX = panX
+                        translationY = panY
                     }
+                    .pointerInput(preview, state.canTapPreview) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            val next = (zoomScale * zoom).coerceIn(1f, 5f)
+                            zoomScale = next
+                            if (next <= 1.01f) {
+                                panX = 0f
+                                panY = 0f
+                            } else {
+                                panX += pan.x
+                                panY += pan.y
+                            }
+                        }
+                    }
+                    .then(
+                        if (state.canTapPreview) {
+                            Modifier.pointerInput(preview, state.canTapPreview, zoomScale, panX, panY) {
+                                detectTapGestures(
+                                    onDoubleTap = {
+                                        zoomScale = 1f
+                                        panX = 0f
+                                        panY = 0f
+                                    },
+                                    onTap = { offset ->
+                                        val unzoomedX = size.width / 2f +
+                                            (offset.x - size.width / 2f - panX) / zoomScale
+                                        val unzoomedY = size.height / 2f +
+                                            (offset.y - size.height / 2f - panY) / zoomScale
+                                        val rect = fittedImageRect(
+                                            size.width.toFloat(),
+                                            size.height.toFloat(),
+                                            preview.width,
+                                            preview.height
+                                        )
+                                        val fx = (unzoomedX - rect[0]) / rect[2]
+                                        val fy = (unzoomedY - rect[1]) / rect[3]
+                                        if (fx in 0f..1f && fy in 0f..1f) onTapFocusPoint(fx, fy)
+                                    }
+                                )
+                            }
+                        } else {
+                            Modifier
+                        }
+                    )
+            ) {
+                Image(
+                    bitmap = preview,
+                    contentDescription = "LiveView",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
 
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val rect = fittedImageRect(
-                            size.width, size.height, preview.width, preview.height
+                if (settings.showGrid) {
+                    RuleOfThirdsGrid(Modifier.fillMaxSize())
+                }
+
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val rect = fittedImageRect(
+                        size.width, size.height, preview.width, preview.height
+                    )
+                    state.manualField?.let { field ->
+                        drawFocusFrame(rect, field, Accent, corners = false)
+                    }
+                    state.afFrame?.let { frame ->
+                        drawFocusFrame(
+                            rect,
+                            frame,
+                            if (frame.focused) SharpGreen else WarnAmber,
+                            corners = true
                         )
-                        state.manualField?.let { field ->
-                            drawFocusFrame(rect, field, Accent, corners = false)
-                        }
-                        state.afFrame?.let { frame ->
-                            drawFocusFrame(
-                                rect,
-                                frame,
-                                if (frame.focused) SharpGreen else WarnAmber,
-                                corners = true
-                            )
-                        }
                     }
                 }
-            } else {
-                Text(
-                    text = when {
-                        state.connected && !state.appControlsCamera ->
-                            "LiveView aus - die Kamera wird gerade am Body bedient"
-
-                        state.connected -> "Warte auf LiveView-Bild ..."
-                        else -> "Kein LiveView"
-                    },
-                    color = Muted,
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 24.dp)
-                )
             }
+        } else {
+            Text(
+                text = when {
+                    state.connected && !state.appControlsCamera ->
+                        "LiveView aus - die Kamera wird gerade am Body bedient"
 
-            // Recording indicator
+                    state.connected -> "Warte auf LiveView-Bild ..."
+                    else -> "Kein LiveView"
+                },
+                color = Muted,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp)
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top
+        ) {
             if (state.recording) {
                 Row(
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(10.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(BlurRed.copy(alpha = 0.92f))
                         .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -539,102 +622,113 @@ private fun PreviewCard(
                     )
                 }
             }
+            FullscreenHudButton(
+                expanded = isFullscreen,
+                onClick = onToggleFullscreen
+            )
+        }
 
-            // Shutter release confirmation
-            if (state.captureFlashActive) {
+        if (state.captureFlashActive) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Accent)
+                    .padding(horizontal = 18.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = "FOTO AUSGELOEST",
+                    color = Color.Black,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+        }
+
+        if (state.autofocusFlashActive ||
+            state.focus.state == FocusState.AUTOFOCUS_TRIGGERED
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(4.dp, Accent, RoundedCornerShape(14.dp)),
+                contentAlignment = Alignment.Center
+            ) {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
                         .clip(RoundedCornerShape(10.dp))
                         .background(Accent)
                         .padding(horizontal = 18.dp, vertical = 10.dp)
                 ) {
                     Text(
-                        text = "FOTO AUSGELOEST",
+                        text = "AUTOFOCUS AKTIVIERT",
                         color = Color.Black,
                         fontWeight = FontWeight.Bold,
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
             }
+        }
 
-            // Autofocus flash
-            if (state.autofocusFlashActive ||
-                state.focus.state == FocusState.AUTOFOCUS_TRIGGERED
+        if (preview != null) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .border(4.dp, Accent, RoundedCornerShape(14.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
+                LiveViewStatusHud(state)
+                if (settings.showHistogram) {
+                    HistogramOverlay(state.histogram)
+                }
+                if (zoomScale > 1.01f) {
+                    Text(
+                        text = "%.1fx  ·  DoppelTipp setzt zurueck".format(zoomScale),
+                        color = Color.White.copy(alpha = 0.8f),
+                        style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Accent)
-                            .padding(horizontal = 18.dp, vertical = 10.dp)
-                    ) {
-                        Text(
-                            text = "AUTOFOCUS AKTIVIERT",
-                            color = Color.Black,
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                    }
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
                 }
             }
 
-            if (preview != null) {
-                Column(
+            if (state.connected && state.appControlsCamera) {
+                CaptureRail(
+                    state = state,
+                    onCapturePhoto = onCapturePhoto,
+                    onToggleRecording = onToggleRecording,
+                    onFocusNow = onFocusNow,
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    LiveViewStatusHud(state)
-                    if (settings.showHistogram) {
-                        HistogramOverlay(state.histogram)
-                    }
-                    if (zoomScale > 1.01f) {
-                        Text(
-                            text = "%.1fx  ·  DoppelTipp setzt zurueck".format(zoomScale),
-                            color = Color.White.copy(alpha = 0.8f),
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(Color.Black.copy(alpha = 0.45f))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-
-                if (state.connected && state.appControlsCamera) {
-                    CaptureRail(
-                        state = state,
-                        onCapturePhoto = onCapturePhoto,
-                        onToggleRecording = onToggleRecording,
-                        onFocusNow = onFocusNow,
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .padding(8.dp)
-                    )
-                }
-
-                Text(
-                    text = "%.1f fps  |  %s  |  %d ms  |  %d kB".format(
-                        state.fps,
-                        state.analysisResolution,
-                        state.analysisDurationMs,
-                        state.jpegSizeKb
-                    ),
-                    color = Color.White.copy(alpha = 0.75f),
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
+                        .align(Alignment.CenterEnd)
                         .padding(8.dp)
                 )
             }
+
+            Text(
+                text = "%.1f fps  |  %s  |  %d ms  |  %d kB".format(
+                    state.fps,
+                    state.analysisResolution,
+                    state.analysisDurationMs,
+                    state.jpegSizeKb
+                ),
+                color = Color.White.copy(alpha = 0.75f),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+            )
         }
+
+        CompactMonitoringButton(
+            monitoring = state.focus.monitoring,
+            enabled = canMonitor,
+            onClick = onToggleMonitoring,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(8.dp)
+        )
     }
 }
 
