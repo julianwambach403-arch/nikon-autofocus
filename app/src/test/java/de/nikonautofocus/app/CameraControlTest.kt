@@ -165,4 +165,18 @@ class CameraControlTest {
         assertTrue(enumerated.accepts(PtpConstants.AF_AREA_SPOT))
         assertTrue(!enumerated.accepts(PtpConstants.AF_AREA_TRACKING))
     }
+
+    @Test
+    fun `ChangeAfArea uses the liveview JPEG grid not the whole-image grid`() {
+        val center = de.nikonautofocus.app.liveview.AfAreaCoordinates.toLiveViewPixels(
+            0.5f, 0.5f, 640, 424
+        )
+        assertEquals(320, center!!.first)
+        assertEquals(212, center.second)
+        val topLeft = de.nikonautofocus.app.liveview.AfAreaCoordinates.toLiveViewPixels(
+            0f, 0f, 640, 424
+        )
+        assertEquals(1, topLeft!!.first)
+        assertEquals(1, topLeft.second)
+    }
 }

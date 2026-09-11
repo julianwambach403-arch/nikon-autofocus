@@ -16,6 +16,7 @@ import de.nikonautofocus.app.focus.FocusSettings
 import de.nikonautofocus.app.focus.FocusState
 import de.nikonautofocus.app.focus.FocusStateMachine
 import de.nikonautofocus.app.focus.FocusStatus
+import de.nikonautofocus.app.liveview.AfAreaCoordinates
 import de.nikonautofocus.app.liveview.LiveViewProcessor
 import de.nikonautofocus.app.settings.SettingsRepository
 import de.nikonautofocus.app.usb.AfModeState
@@ -36,7 +37,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /** Everything the screen renders. */
 data class UiState(
@@ -490,12 +490,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun changeCameraAfArea(x: Float, y: Float) {
         if (!usbManager.isConnected) return
         if (capabilities?.changeAfArea != true) return
-        if (lastAfImageWidth <= 0 || lastAfImageHeight <= 0) return
-        val pixelX = (x * lastAfImageWidth).toInt()
-        val pixelY = (y * lastAfImageHeight).toInt()
+        val aim = AfAreaCoordinates.toLiveViewPixels(x, y, lastJpegWidth, lastJpegHeight)
+            ?: return
         viewModelScope.launch {
             val code = try {
-                usbManager.withCamera { it.changeAfArea(pixelX, pixelY) }
+                usbManager.withCamera { it.changeAfArea(aim.first, aim.second) }
             } catch (e: CameraException) {
                 publish(error = e.error.message)
                 return@launch
@@ -938,16 +937,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Pixel coordinates for ChangeAfArea: the LiveView header's whole-image size when
-     * known, otherwise the JPEG. The user field is stored as 0..1 of the displayed frame.
+     * Pixel coordinates for ChangeAfArea on the LiveView JPEG grid (not the header's
+     * whole-image size). See [AfAreaCoordinates].
      */
     private fun manualFieldAimPixels(): Pair<Int, Int>? {
         val field = settingsRepository.current.measuringField ?: return null
-        val width = lastAfImageWidth.takeIf { it > 0 } ?: lastJpegWidth
-        val height = lastAfImageHeight.takeIf { it > 0 } ?: lastJpegHeight
-        if (width <= 0 || height <= 0) return null
-        return (field.centerX * width).roundToInt().coerceIn(1, width) to
-            (field.centerY * height).roundToInt().coerceIn(1, height)
+        return AfAreaCoordinates.toLiveViewPixels(
+            field.centerX,
+            field.centerY,
+            lastJpegWidth,
+            lastJpegHeight
+        )
     }
 
     // ------------------------------------------------------------------ helpers

@@ -427,8 +427,8 @@ andere Varianz-Skala. Die App weist im UI darauf hin.
 
 ### AF-Messfeld verschieben
 
-Tippen ins Vorschaubild sendet `Nikon_ChangeAfArea` (0x9205) mit den Koordinaten im
-Gesamtbild-Raum (Offset 4/6). Der Knopf erscheint nur, wenn die Kamera den Opcode meldet.
+Tippen ins Vorschaubild sendet `Nikon_ChangeAfArea` (0x9205) mit Koordinaten im
+LiveView-JPEG (Header Offset 0/2), nicht im großen Gesamtbild-Raster (Offset 4/6).
 
 ### Wenn der Videostart mit `Nikon_InvalidStatus` abgelehnt wird
 

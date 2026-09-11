@@ -724,8 +724,8 @@ class NikonPtpCamera(
     /**
      * Moves the AF frame inside the LiveView image.
      *
-     * Coordinates are in the "whole image" space the LiveView header reports at offset
-     * 4/6, which is why the caller passes absolute pixels rather than fractions.
+     * Coordinates are in the LiveView JPEG pixel grid (header offset 0/2), not the
+     * larger "whole image" grid at offset 4/6.
      */
     fun changeAfArea(x: Int, y: Int): Int {
         if (!capabilities.changeAfArea) return PtpConstants.RC_OPERATION_NOT_SUPPORTED
@@ -744,17 +744,26 @@ class NikonPtpCamera(
      * [aimX], [aimY] so contrast-detect AF actually runs on that spot.
      */
     private fun prepareFocusOnManualField(aimX: Int?, aimY: Int?) {
-        preferSelectableAfArea()
         if (aimX == null || aimY == null) {
             Log.w(TAG, "Manuelles Fokusfeld aktiv, aber keine Zielkoordinaten")
+            preferSelectableAfArea()
             return
         }
+        // Move the point first so a Face->Spot switch does not sit on the default
+        // top-left until after AfDrive. Repeat after the mode change; some bodies
+        // reset the AF area when 0xD05D is written.
+        pointAfArea(aimX, aimY)
+        preferSelectableAfArea()
+        pointAfArea(aimX, aimY)
+    }
+
+    private fun pointAfArea(x: Int, y: Int) {
         if (!capabilities.changeAfArea) {
             Log.w(TAG, "ChangeAfArea 0x9205 fehlt - AF laeuft ohne Feldverschiebung")
             return
         }
-        val code = changeAfArea(aimX, aimY)
-        Log.i(TAG, "ChangeAfArea -> ($aimX,$aimY): ${PtpConstants.responseName(code)}")
+        val code = changeAfArea(x, y)
+        Log.i(TAG, "ChangeAfArea -> ($x,$y): ${PtpConstants.responseName(code)}")
         if (code == PtpConstants.RC_OK || code == PtpConstants.RC_DEVICE_BUSY) {
             waitUntilReady(intervalMs = 20, timeoutMs = 1500)
         }
