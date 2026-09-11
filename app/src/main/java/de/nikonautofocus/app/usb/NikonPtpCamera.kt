@@ -171,6 +171,11 @@ data class MovieDiagnostics(
         liveViewSelector != null && liveViewSelector == PtpConstants.LIVE_VIEW_SELECTOR_STILL ->
             "LiveView steht auf Foto (0xD1A6 = 0). Nikon startet Video nur aus dem Video-LiveView."
 
+        applicationMode != null && applicationMode != 1L ->
+            "ApplicationMode (0xD1F0) steht auf $applicationMode. Die Kamera hat den Wechsel " +
+                "in den Application-Modus nicht uebernommen, obwohl LiveView dafuer beendet " +
+                "wurde - StartMovieRecInCard laeuft nur im Application-Modus."
+
         exposureProgram != null && !PtpConstants.isPsamMode(exposureProgram) ->
             "Moduswahlrad steht auf " + PtpConstants.exposureProgramName(exposureProgram) +
                 ". Nikon erlaubt Fernsteuerung in der Regel nur in P, S, A oder M."
@@ -367,8 +372,12 @@ class NikonPtpCamera(
     /**
      * Brings the camera into a state where preview frames can be pulled.
      * Follows the sequence libgphoto2 uses for Nikon bodies.
+     *
+     * @param mediaToSdram write RecordingMedia = SDRAM first (the libgphoto2 preview
+     *        default). The movie path passes false so LiveView starts with the card
+     *        already selected and no property has to be flipped mid stream.
      */
-    fun startLiveView() {
+    fun startLiveView(mediaToSdram: Boolean = true) {
         when (capabilities.frameSource) {
             FrameSource.NONE -> throw CameraException(
                 CameraError.LiveViewUnsupported(
@@ -395,7 +404,7 @@ class NikonPtpCamera(
         }
 
         // Nikon wants the recording media set to SDRAM before LiveView on many bodies.
-        if (capabilities.hasRecordingMediaProp) {
+        if (mediaToSdram && capabilities.hasRecordingMediaProp) {
             runCatching {
                 session.setDevicePropValue(
                     PtpConstants.DPC_NIKON_RECORDING_MEDIA, 1, PtpConstants.DTC_UINT8
@@ -440,6 +449,10 @@ class NikonPtpCamera(
         if (capabilities.endLiveView) {
             runCatching { session.transact(PtpConstants.OC_NIKON_END_LIVE_VIEW) }
         }
+        // ApplicationMode is only writable with LiveView off, so this is the one place
+        // where handing the body back in its normal mode is guaranteed to work.
+        waitUntilReady(intervalMs = 20, timeoutMs = 1500)
+        resetApplicationMode()
         releaseControlIfTaken()
     }
 
@@ -939,15 +952,18 @@ class NikonPtpCamera(
      * Starts a movie recording.
      *
      * This is the libgphoto2 `_put_Nikon_Movie` / `ptp_nikon_startmovie` path
-     * (`camlibs/ptp2/config.c`, `ptp.h`): ApplicationMode on, LiveView on,
+     * (`camlibs/ptp2/config.c`, `ptp.h`): ApplicationMode on, **then** LiveView on,
      * then `PTP_OC_NIKON_StartMovieRecInCard` (0x920A) with **no parameters and no
      * data**. That opcode is the tethered equivalent of the red movie button: the
      * D3400 writes the clip to the SD card.
      *
-     * RecordingMedia is pointed at the card first, same as a still capture. The
-     * LiveView start sequence leaves it on SDRAM; sending StartMovieRec**InCard**
-     * against SDRAM is what D3400 answers with InvalidStatus. Camera Connect and
-     * Control keeps the destination on the card, which is also the camera default.
+     * The order matters. Nikon only lets a host change ApplicationMode (0xD1F0) while
+     * LiveView is off, and a LiveView session that was started in photo mode stays a
+     * photo session: 0x920A is then answered with InvalidStatus although
+     * MovRecProhibitCondition reads 0 - exactly what the D3400 (V1.13) does. So when
+     * the body is not yet in application mode, LiveView is ended, the mode is written,
+     * RecordingMedia is pointed at the card and LiveView is started again before the
+     * record opcode goes out. PC control is kept throughout.
      */
     fun startMovieRecording(): MovieResult {
         if (!capabilities.canRecordMovie && !capabilities.openCapture) {
@@ -961,10 +977,14 @@ class NikonPtpCamera(
             return MovieResult.Failed(e.error)
         }
 
-        // libgphoto2: set 0xD1F0 and/or send 0x9435 before 0x920A. The D3400 exposes
-        // ApplicationMode (0xD1F0) and leaves it at 0 until a host writes 1.
-        enterApplicationMode()
-        waitUntilReady(intervalMs = 50, timeoutMs = 1000)
+        var restartedForApplicationMode = false
+        if (capabilities.hasApplicationModeProp && readApplicationMode() != 1L) {
+            restartedForApplicationMode = true
+            restartLiveViewInApplicationMode()
+        } else {
+            enterApplicationMode()
+            waitUntilReady(intervalMs = 50, timeoutMs = 1000)
+        }
 
         pointRecordingMediaAtCard()
         waitUntilReady(intervalMs = 50, timeoutMs = 1000)
@@ -984,6 +1004,32 @@ class NikonPtpCamera(
                 lastCode == PtpConstants.RC_NIKON_BULB_RELEASE_BUSY
             ) {
                 return MovieResult.Busy(PtpConstants.responseName(lastCode))
+            }
+
+            val refused = lastCode == PtpConstants.RC_NIKON_INVALID_STATUS ||
+                lastCode == PtpConstants.RC_NIKON_NOT_LIVE_VIEW
+
+            // Bodies with ApplicationMode that still refuse: the mode was already 1
+            // before this call (so no restart happened yet), or the write during
+            // LiveView was silently ignored. One full off/on cycle in application
+            // mode is the only way to be sure the LiveView session is a movie session.
+            if (refused && capabilities.hasApplicationModeProp && !restartedForApplicationMode) {
+                restartedForApplicationMode = true
+                restartLiveViewInApplicationMode()
+                pointRecordingMediaAtCard()
+                ensureLiveViewIsOn()
+                drainEvents()
+                lastCode = attemptNikonMovieStart()
+                if (lastCode == PtpConstants.RC_OK) {
+                    movieRecording = true
+                    movieUsesOpenCapture = false
+                    return MovieResult.Started
+                }
+                if (lastCode == PtpConstants.RC_DEVICE_BUSY ||
+                    lastCode == PtpConstants.RC_NIKON_BULB_RELEASE_BUSY
+                ) {
+                    return MovieResult.Busy(PtpConstants.responseName(lastCode))
+                }
             }
 
             // Higher-end bodies with a still/movie LiveView switch: 0x920A is refused
@@ -1063,6 +1109,64 @@ class NikonPtpCamera(
             if (lastCode != PtpConstants.RC_DEVICE_BUSY) return lastCode
         }
         return lastCode
+    }
+
+    private fun readApplicationMode(): Long? =
+        readPropOrNull(PtpConstants.DPC_NIKON_APPLICATION_MODE, PtpConstants.DTC_UINT8)
+
+    /**
+     * The Nikon SDK sequence for MovRecInCard on bodies with ApplicationMode:
+     * LiveView off -> ApplicationMode = 1 -> RecordingMedia = card -> LiveView on.
+     *
+     * Ending LiveView here keeps PC control, so the body does not fall back to its
+     * physical buttons in between. The result is logged either way; a body that
+     * refuses the write shows up as "ApplicationMode 0" in the diagnostics.
+     */
+    private fun restartLiveViewInApplicationMode() {
+        if (!capabilities.hasApplicationModeProp) return
+
+        stopLiveViewKeepingControl()
+        waitUntilLiveViewOff()
+
+        val before = readApplicationMode()
+        val response = runCatching {
+            session.setDevicePropValue(
+                PtpConstants.DPC_NIKON_APPLICATION_MODE, 1, PtpConstants.DTC_UINT8
+            )
+        }.getOrNull()
+        waitUntilReady(intervalMs = 50, timeoutMs = 1500)
+        val after = readApplicationMode()
+        Log.i(
+            TAG,
+            "ApplicationMode 0xD1F0 (LiveView aus): war $before, gesetzt 1 -> " +
+                (response?.let { PtpConstants.responseName(it.responseCode) } ?: "keine Antwort") +
+                ", jetzt $after"
+        )
+        if (capabilities.changeApplicationMode) {
+            runCatching {
+                session.transact(PtpConstants.OC_NIKON_CHANGE_APPLICATION_MODE, intArrayOf(1))
+            }
+        }
+
+        // Card first, so LiveView does not start against SDRAM and nothing has to be
+        // flipped once the stream is running.
+        if (capabilities.hasRecordingMediaProp) {
+            runCatching {
+                session.setDevicePropValue(
+                    PtpConstants.DPC_NIKON_RECORDING_MEDIA,
+                    PtpConstants.RECORDING_MEDIA_CARD,
+                    PtpConstants.DTC_UINT8
+                )
+            }
+            waitUntilReady(intervalMs = 50, timeoutMs = 1000)
+        }
+
+        try {
+            startLiveView(mediaToSdram = false)
+        } catch (e: CameraException) {
+            Log.w(TAG, "LiveView-Neustart im Application-Modus fehlgeschlagen: ${e.message}")
+        }
+        waitUntilReady(intervalMs = 20, timeoutMs = 2000)
     }
 
     /** libgphoto2 `_put_Nikon_Movie`: ApplicationMode property and/or opcode to 1. */
@@ -1241,10 +1345,11 @@ class NikonPtpCamera(
         movieUsesOpenCapture = false
 
         if (response.isOk || response.responseCode == PtpConstants.RC_NIKON_INVALID_STATUS) {
-            // The card write continues for a moment after the stop command.
+            // The card write continues for a moment after the stop command. Application
+            // mode is deliberately left on: it can only be changed with LiveView off, and
+            // keeping it saves a LiveView restart for the next clip. endLiveView() clears it.
             waitUntilReady(intervalMs = 100, timeoutMs = MOVIE_FLUSH_TIMEOUT)
             drainEvents()
-            resetApplicationMode()
             return MovieResult.Stopped
         }
 

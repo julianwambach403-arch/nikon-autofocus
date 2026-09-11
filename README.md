@@ -439,17 +439,24 @@ und libgphoto2 (`_put_Nikon_Movie`) steht, und liest danach den Kamerazustand au
 
 **Startsequenz (libgphoto2 `_put_Nikon_Movie` + Camera Connect and Control):**
 
-1. **Application-Modus an.** Die D3400 hat Property `0xD1F0` und lässt sie auf 0.
-   libgphoto2 schreibt 1, bevor 0x920A geht. Opcode `0x9435` nur, falls gemeldet.
-2. **LiveView muss laufen** (`LiveViewStatus` 0xD1A2).
-3. **`RecordingMedia` (0xD10B) auf Speicherkarte.** 0x920A ist `StartMovieRecInCard` –
-   dasselbe wie der rote Knopf am Gehäuse. Die LiveView-Startsequenz hinterlässt SDRAM;
-   dagegen antwortet die D3400 mit `InvalidStatus`.
+1. **Application-Modus an – bei ausgeschaltetem LiveView.** Die D3400 hat Property
+   `0xD1F0` und lässt sie auf 0. Nikon übernimmt den Wert nur, solange LiveView **nicht**
+   läuft; eine bereits laufende Foto-LiveView-Sitzung kann 0x920A nicht starten. Steht
+   0xD1F0 beim Druck auf REC noch auf 0, beendet die App deshalb LiveView (PC-Steuerung
+   bleibt), schreibt 1, sendet `0x9435` (falls gemeldet) und startet LiveView neu.
+2. **`RecordingMedia` (0xD10B) auf Speicherkarte.** 0x920A ist `StartMovieRecInCard` –
+   dasselbe wie der rote Knopf am Gehäuse. Der Neustart aus Schritt 1 lässt SDRAM bewusst
+   aus; dagegen antwortet die D3400 mit `InvalidStatus`.
+3. **LiveView muss laufen** (`LiveViewStatus` 0xD1A2), Events werden geleert.
 4. **`DeviceReady`, dann `0x920A` ohne Parameter und ohne Datenphase**
    (`ptp_generic_no_data(..., StartMovieRecInCard, 0)`). Das Video landet auf der SD-Karte.
-5. Nur bei `InvalidStatus` **und** wenn `LiveViewSelector` (0xD1A6) existiert: auf
-   Video-LiveView umschalten und 0x920A erneut. Die D3400 hat diese Property nicht.
+5. Bei `InvalidStatus`/`NotLiveView`: einmal LiveView im Application-Modus neu starten
+   (Schritt 1) und 0x920A wiederholen. Nur wenn `LiveViewSelector` (0xD1A6) existiert,
+   zusätzlich auf Video-LiveView umschalten. Die D3400 hat diese Property nicht.
 6. **Fallback:** `InitiateOpenCapture` (0x101C).
+
+Der Application-Modus bleibt bis zum Ende der LiveView-Sitzung aktiv (`endLiveView` setzt
+0xD1F0 zurück), damit weitere Aufnahmen keinen erneuten LiveView-Neustart brauchen.
 
 **Wenn es dann immer noch scheitert**, zeigt die App keine Vermutung mehr, sondern die
 tatsächlichen Werte – und die PTP-Diagnose klappt dafür von selbst auf:
