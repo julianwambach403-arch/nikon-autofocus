@@ -1,5 +1,9 @@
 package de.nikonautofocus.app.focus
 
+import de.nikonautofocus.app.capture.BracketOrder
+import de.nikonautofocus.app.capture.BracketingSettings
+import de.nikonautofocus.app.capture.IntervalSettings
+
 /**
  * Everything the user can tune. Defaults match the values from the specification:
  * threshold 500, five consecutive blurry frames, three second cooldown.
@@ -64,20 +68,78 @@ data class FocusSettings(
 
     val showGrid: Boolean = true,
     val showHistogram: Boolean = true,
-    val showExposureControls: Boolean = true
+    val showExposureControls: Boolean = true,
+
+    val intervalHours: Int = 0,
+    val intervalMinutes: Int = 0,
+    val intervalSeconds: Int = 5,
+    val intervalCount: Int = 10,
+    val intervalDelaySeconds: Int = 0,
+    val bracketingEnabled: Boolean = false,
+    val bracketingCount: Int = 3,
+    val bracketingStepThirds: Int = 1,
+    /** True: 0 / − / +. False: − / 0 / +. */
+    val bracketingZeroFirst: Boolean = true
 ) {
-    fun sanitized(): FocusSettings = copy(
-        threshold = threshold.coerceIn(THRESHOLD_MIN, THRESHOLD_MAX),
-        requiredBlurryFrames = requiredBlurryFrames.coerceIn(FRAMES_MIN, FRAMES_MAX),
-        movingAverageSize = movingAverageSize.coerceIn(AVERAGE_MIN, AVERAGE_MAX),
-        cooldownMs = cooldownMs.coerceIn(COOLDOWN_MIN_MS, COOLDOWN_MAX_MS),
-        analysisFps = analysisFps.coerceIn(FPS_MIN, FPS_MAX),
-        analysisWidth = analysisWidth.coerceIn(WIDTH_MIN, WIDTH_MAX),
-        autofocusTimeoutMs = autofocusTimeoutMs.coerceIn(AF_TIMEOUT_MIN_MS, AF_TIMEOUT_MAX_MS),
-        manualFieldX = manualFieldX.coerceIn(0f, 1f),
-        manualFieldY = manualFieldY.coerceIn(0f, 1f),
-        manualFieldSize = manualFieldSize.coerceIn(FIELD_SIZE_MIN, FIELD_SIZE_MAX)
-    )
+    fun sanitized(): FocusSettings {
+        val interval = IntervalSettings(
+            hours = intervalHours,
+            minutes = intervalMinutes,
+            seconds = intervalSeconds,
+            shotCount = intervalCount,
+            delaySeconds = intervalDelaySeconds,
+            bracketing = BracketingSettings(
+                enabled = bracketingEnabled,
+                count = bracketingCount,
+                stepThirds = bracketingStepThirds,
+                order = if (bracketingZeroFirst) {
+                    BracketOrder.ZERO_MINUS_PLUS
+                } else {
+                    BracketOrder.MINUS_ZERO_PLUS
+                }
+            )
+        ).sanitized()
+        return copy(
+            threshold = threshold.coerceIn(THRESHOLD_MIN, THRESHOLD_MAX),
+            requiredBlurryFrames = requiredBlurryFrames.coerceIn(FRAMES_MIN, FRAMES_MAX),
+            movingAverageSize = movingAverageSize.coerceIn(AVERAGE_MIN, AVERAGE_MAX),
+            cooldownMs = cooldownMs.coerceIn(COOLDOWN_MIN_MS, COOLDOWN_MAX_MS),
+            analysisFps = analysisFps.coerceIn(FPS_MIN, FPS_MAX),
+            analysisWidth = analysisWidth.coerceIn(WIDTH_MIN, WIDTH_MAX),
+            autofocusTimeoutMs = autofocusTimeoutMs.coerceIn(AF_TIMEOUT_MIN_MS, AF_TIMEOUT_MAX_MS),
+            manualFieldX = manualFieldX.coerceIn(0f, 1f),
+            manualFieldY = manualFieldY.coerceIn(0f, 1f),
+            manualFieldSize = manualFieldSize.coerceIn(FIELD_SIZE_MIN, FIELD_SIZE_MAX),
+            intervalHours = interval.hours,
+            intervalMinutes = interval.minutes,
+            intervalSeconds = interval.seconds,
+            intervalCount = interval.shotCount,
+            intervalDelaySeconds = interval.delaySeconds,
+            bracketingEnabled = interval.bracketing.enabled,
+            bracketingCount = interval.bracketing.count,
+            bracketingStepThirds = interval.bracketing.stepThirds,
+            bracketingZeroFirst = interval.bracketing.order == BracketOrder.ZERO_MINUS_PLUS
+        )
+    }
+
+    fun intervalPlan(): IntervalSettings =
+        IntervalSettings(
+            hours = intervalHours,
+            minutes = intervalMinutes,
+            seconds = intervalSeconds,
+            shotCount = intervalCount,
+            delaySeconds = intervalDelaySeconds,
+            bracketing = BracketingSettings(
+                enabled = bracketingEnabled,
+                count = bracketingCount,
+                stepThirds = bracketingStepThirds,
+                order = if (bracketingZeroFirst) {
+                    BracketOrder.ZERO_MINUS_PLUS
+                } else {
+                    BracketOrder.MINUS_ZERO_PLUS
+                }
+            )
+        ).sanitized()
 
     /** The measuring field, or null when the whole frame is measured. */
     val measuringField: MeasuringField?

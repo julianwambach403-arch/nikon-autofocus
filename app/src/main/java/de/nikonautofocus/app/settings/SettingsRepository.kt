@@ -46,7 +46,16 @@ class SettingsRepository(context: Context) {
             showHistogram = prefs.getBoolean(KEY_SHOW_HISTOGRAM, defaults.showHistogram),
             showExposureControls = prefs.getBoolean(
                 KEY_SHOW_EXPOSURE, defaults.showExposureControls
-            )
+            ),
+            intervalHours = prefs.getInt(KEY_INTERVAL_H, defaults.intervalHours),
+            intervalMinutes = prefs.getInt(KEY_INTERVAL_M, defaults.intervalMinutes),
+            intervalSeconds = prefs.getInt(KEY_INTERVAL_S, defaults.intervalSeconds),
+            intervalCount = prefs.getInt(KEY_INTERVAL_COUNT, defaults.intervalCount),
+            intervalDelaySeconds = prefs.getInt(KEY_INTERVAL_DELAY, defaults.intervalDelaySeconds),
+            bracketingEnabled = prefs.getBoolean(KEY_BRACKET_ON, defaults.bracketingEnabled),
+            bracketingCount = prefs.getInt(KEY_BRACKET_COUNT, defaults.bracketingCount),
+            bracketingStepThirds = prefs.getInt(KEY_BRACKET_STEP, defaults.bracketingStepThirds),
+            bracketingZeroFirst = prefs.getBoolean(KEY_BRACKET_ZERO_FIRST, defaults.bracketingZeroFirst)
         ).sanitized()
     }
 
@@ -72,6 +81,15 @@ class SettingsRepository(context: Context) {
             .putBoolean(KEY_SHOW_GRID, next.showGrid)
             .putBoolean(KEY_SHOW_HISTOGRAM, next.showHistogram)
             .putBoolean(KEY_SHOW_EXPOSURE, next.showExposureControls)
+            .putInt(KEY_INTERVAL_H, next.intervalHours)
+            .putInt(KEY_INTERVAL_M, next.intervalMinutes)
+            .putInt(KEY_INTERVAL_S, next.intervalSeconds)
+            .putInt(KEY_INTERVAL_COUNT, next.intervalCount)
+            .putInt(KEY_INTERVAL_DELAY, next.intervalDelaySeconds)
+            .putBoolean(KEY_BRACKET_ON, next.bracketingEnabled)
+            .putInt(KEY_BRACKET_COUNT, next.bracketingCount)
+            .putInt(KEY_BRACKET_STEP, next.bracketingStepThirds)
+            .putBoolean(KEY_BRACKET_ZERO_FIRST, next.bracketingZeroFirst)
             .apply()
     }
 
@@ -96,5 +114,14 @@ class SettingsRepository(context: Context) {
         private const val KEY_SHOW_GRID = "show_grid"
         private const val KEY_SHOW_HISTOGRAM = "show_histogram"
         private const val KEY_SHOW_EXPOSURE = "show_exposure_controls"
+        private const val KEY_INTERVAL_H = "interval_hours"
+        private const val KEY_INTERVAL_M = "interval_minutes"
+        private const val KEY_INTERVAL_S = "interval_seconds"
+        private const val KEY_INTERVAL_COUNT = "interval_count"
+        private const val KEY_INTERVAL_DELAY = "interval_delay_sec"
+        private const val KEY_BRACKET_ON = "bracketing_enabled"
+        private const val KEY_BRACKET_COUNT = "bracketing_count"
+        private const val KEY_BRACKET_STEP = "bracketing_step_thirds"
+        private const val KEY_BRACKET_ZERO_FIRST = "bracketing_zero_first"
     }
 }

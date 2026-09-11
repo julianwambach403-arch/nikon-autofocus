@@ -545,6 +545,23 @@ Messfeldsteuerung muss dann am Kamerabody eingestellt werden.
 
 ---
 
+## 7b. Intervallaufnahme und Belichtungsreihe
+
+Die D3400 hat **keinen Intervall-Timer und kein AE-Bracketing**. Beides setzt die App um:
+
+1. **Intervall.** Start-zu-Start (nicht Ende-zu-Start). Anzahl = Reihen. Pause/Fortsetzen/
+   Abbrechen. `DeviceBusy` wird kurz wiederholt, verpasste Slots werden gezählt. Ein
+   Foreground-Service (`connectedDevice`) plus WakeLock hält die Serie bei Bildschirm aus.
+2. **Bracketing.** 3/5/7 Bilder, Schritt ⅓–3 EV, Reihenfolge 0/−/+ oder −/0/+.
+   In **M** die Verschlusszeit (`0x500D`, Sekunden × 10 000), in **P/A/S** die
+   Belichtungskorrektur (`0x5010`, Tausendstel EV). AUTO/Motivprogramme werden vor dem Start
+   abgelehnt. Grenzen: 1/4000 s–30 s, Korrektur ±5 EV. Danach immer die Originalwerte
+   zurückschreiben.
+3. **Kombination.** Pro Intervall eine komplette Reihe. Anzeige „Reihen × Bilder = Fotos“.
+   Warnung, wenn Reihe oder Einzelbild länger dauert als das Intervall.
+
+---
+
 ## 8a. Warum die Tasten an der Kamera nichts tun – und was die App dagegen macht
 
 Das ist kein Fehler der App, sondern wie Nikon Tethering umsetzt: **solange ein Host die
@@ -599,8 +616,10 @@ Die App bietet beides an:
   kann.
 * **Interne Videoaufnahme blockiert Fokusbefehle.** Siehe oben – wird als `DeviceBusy`
   erkannt und benannt.
-* **Kein Hintergrundbetrieb.** Die Analyse läuft, solange die App im Vordergrund ist. Der
-  Bildschirm wird per `FLAG_KEEP_SCREEN_ON` wachgehalten.
+* **Intervallaufnahme im Hintergrund.** Eine laufende Intervallserie hält den Prozess per
+  Foreground-Service und WakeLock, auch bei ausgeschaltetem Bildschirm. Wischen aus Recents
+  beendet USB und damit die Serie. Die Schärfeanalyse selbst läuft nur, solange LiveView
+  gepollt wird.
 * **Ein Score ist kein Schärfegrad in Metern.** Ein Motivwechsel (z. B. kontrastarme weiße
   Wand) senkt den Score genauso wie echte Unschärfe. Die Kombination aus Glättung,
   N-Frames-Bestätigung und Cooldown fängt das ab, aber ein Motiv völlig ohne Kontrast bleibt

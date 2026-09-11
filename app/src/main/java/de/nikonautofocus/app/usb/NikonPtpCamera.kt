@@ -675,6 +675,12 @@ class NikonPtpCamera(
         return result
     }
 
+    /** Raw DevicePropDesc for a property the body actually advertises. */
+    fun readPropertyDesc(propertyCode: Int): PtpDevicePropDesc? {
+        if (!deviceInfo.hasProperty(propertyCode)) return null
+        return runCatching { session.getDevicePropDesc(propertyCode) }.getOrNull()
+    }
+
     fun setCameraProperty(propertyCode: Int, value: Long, dataType: Int): Int {
         if (!deviceInfo.hasProperty(propertyCode)) {
             return PtpConstants.RC_OPERATION_NOT_SUPPORTED

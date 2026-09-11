@@ -10,6 +10,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import de.nikonautofocus.app.analysis.SharpnessAnalyzer
 import de.nikonautofocus.app.capture.CaptureController
+import de.nikonautofocus.app.capture.IntervalController
+import de.nikonautofocus.app.capture.IntervalSession
+import de.nikonautofocus.app.capture.IntervalSlotResult
+import de.nikonautofocus.app.capture.IntervalTiming
+import de.nikonautofocus.app.capture.BracketingController
+import de.nikonautofocus.app.capture.BracketValidation
+import de.nikonautofocus.app.capture.PreparedBracket
+import de.nikonautofocus.app.capture.IntervalSettings
+import de.nikonautofocus.app.service.IntervalCaptureService
 import de.nikonautofocus.app.focus.FocusAction
 import de.nikonautofocus.app.focus.FocusController
 import de.nikonautofocus.app.focus.FocusSettings
@@ -37,6 +46,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -96,7 +106,8 @@ data class UiState(
     val cameraControlBusy: Boolean = false,
     val batteryPercent: Int? = null,
     val remainingImages: Long? = null,
-    val histogram: List<Int> = emptyList()
+    val histogram: List<Int> = emptyList(),
+    val interval: IntervalSession = IntervalSession.idle()
 )
 
 /** What the app can actually say about where the camera is focusing. */
@@ -134,6 +145,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val analyzer = SharpnessAnalyzer(settingsRepository.current.analysisWidth)
     private val focusController = FocusController(usbManager)
     private val captureController = CaptureController(usbManager)
+    private val bracketingController = BracketingController(usbManager, captureController)
+    private val intervalController = IntervalController()
     private val stateMachine = FocusStateMachine(settingsRepository.current)
 
     private val _uiState = MutableStateFlow(UiState(focus = stateMachine.snapshot()))
@@ -198,6 +211,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Shutter release / movie recording.
     private var captureJob: Job? = null
+    private var intervalJob: Job? = null
     private var recordingTickerJob: Job? = null
     private var captureFlashUntil = 0L
     private var appControlsCamera = true
@@ -627,6 +641,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCameraProperty(propertyCode: Int, value: Long, dataType: Int) {
         if (cameraControlJob?.isActive == true) return
+        if (intervalController.session.value.active) return
         if (!usbManager.isConnected) {
             publish(error = CameraError.Disconnected.message)
             return
@@ -674,7 +689,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * cooldown - the black frames right after a capture must not be read as "blurry".
      */
     fun capturePhoto() {
-        if (captureJob?.isActive == true) return
+        if (captureJob?.isActive == true || intervalController.session.value.active) return
         if (!usbManager.isConnected) {
             publish(error = CameraError.Disconnected.message)
             return
@@ -703,8 +718,134 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun toggleRecording() {
+    fun startIntervalSeries() {
+        if (intervalJob?.isActive == true) return
         if (captureJob?.isActive == true) return
+        if (!usbManager.isConnected) {
+            publish(error = CameraError.Disconnected.message)
+            return
+        }
+        if (!appControlsCamera) {
+            publish(warning = "Intervallaufnahme braucht die Kamerasteuerung durch die App.")
+            return
+        }
+        if (captureController.recording) {
+            publish(warning = "Waehrend einer Videoaufnahme ist keine Intervallserie moeglich.")
+            return
+        }
+        intervalJob = viewModelScope.launch {
+            val plan = settingsRepository.current.intervalPlan()
+            val prepared: PreparedBracket? = if (plan.bracketing.enabled) {
+                when (val validation = bracketingController.prepare(plan.bracketing)) {
+                    is BracketValidation.Rejected -> {
+                        publish(error = validation.reason)
+                        return@launch
+                    }
+                    is BracketValidation.Ready -> validation.plan
+                }
+            } else {
+                null
+            }
+
+            val shutterPtp = cameraControls
+                .firstOrNull { it.propertyCode == PtpConstants.DPC_EXPOSURE_TIME }
+                ?.current ?: 10_000L
+            val warnings = IntervalTiming.durationWarnings(
+                intervalMs = plan.intervalMs,
+                shutterPtp = shutterPtp,
+                saveBufferMs = IntervalSettings.DEFAULT_SAVE_BUFFER_MS,
+                bracket = prepared
+            )
+            if (warnings.isNotEmpty()) {
+                publish(warning = warnings.joinToString(" "))
+            }
+
+            val collectJob = launch {
+                intervalController.session.collect {
+                    IntervalCaptureService.startOrUpdate(getApplication(), it)
+                    publish()
+                }
+            }
+            var end = IntervalSession.idle()
+            try {
+                intervalController.run(plan) { _, missed ->
+                    shootIntervalSlot(prepared, missed)
+                }
+            } finally {
+                end = intervalController.session.value
+                collectJob.cancel()
+                IntervalCaptureService.stop(getApplication())
+                refreshCameraControls()
+                recoverLiveViewIfNeeded()
+                publish(
+                    info = end.lastMessage ?: "Intervallserie beendet",
+                    warning = if (end.missedSlots > 0) {
+                        "${end.missedSlots} Aufnahme(n) verpasst (Kamera war beschaeftigt oder das Intervall war zu kurz)."
+                    } else {
+                        KEEP
+                    }
+                )
+            }
+        }
+    }
+
+    fun pauseIntervalSeries() = intervalController.pause()
+
+    fun resumeIntervalSeries() = intervalController.resume()
+
+    fun cancelIntervalSeries() {
+        intervalController.requestCancel()
+    }
+
+    private suspend fun shootIntervalSlot(
+        prepared: PreparedBracket?,
+        missed: Boolean
+    ): IntervalSlotResult {
+        val target = if (settingsRepository.current.captureToCard) {
+            CaptureTarget.CARD
+        } else {
+            CaptureTarget.SDRAM
+        }
+        if (prepared != null) {
+            val outcome = bracketingController.shootSeries(
+                plan = prepared,
+                target = target,
+                cancelled = { intervalController.cancelling }
+            )
+            if (outcome.photos > 0) captureFlashUntil = SystemClock.elapsedRealtime() + AF_FLASH_MS
+            stateMachine.onCameraInterruption()
+            recoverLiveViewIfNeeded()
+            return IntervalSlotResult(
+                photos = outcome.photos,
+                warning = listOfNotNull(
+                    if (missed) "Slot verpasst" else null,
+                    outcome.warning
+                ).joinToString(". ").ifBlank { null }
+            )
+        }
+        val deadline = System.currentTimeMillis() + 20_000L
+        var last = captureController.capturePhoto(target)
+        while (!last.success && !last.disableCapture && System.currentTimeMillis() < deadline) {
+            val busy = last.description.contains("beschaeftigt", ignoreCase = true) ||
+                (last.warning?.contains("beschaeftigt", ignoreCase = true) == true)
+            if (!busy) break
+            kotlinx.coroutines.delay(250)
+            last = captureController.capturePhoto(target)
+        }
+        if (last.success) captureFlashUntil = SystemClock.elapsedRealtime() + AF_FLASH_MS
+        stateMachine.onCameraInterruption()
+        recoverLiveViewIfNeeded()
+        return IntervalSlotResult(
+            photos = if (last.success) 1 else 0,
+            warning = listOfNotNull(
+                if (missed) "Slot verpasst" else null,
+                last.warning ?: last.takeIf { !it.success }?.description
+            ).joinToString(". ").ifBlank { null }
+        )
+    }
+
+    fun toggleRecording() {
+        if (captureJob?.isActive == true || intervalController.session.value.active) return
         if (!usbManager.isConnected) {
             publish(error = CameraError.Disconnected.message)
             return
@@ -816,6 +957,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopRecordingTicker()
         captureJob?.cancel()
         captureJob = null
+        intervalController.requestCancel()
+        intervalJob?.cancel()
+        intervalJob = null
+        IntervalCaptureService.stop(getApplication())
+        intervalController.reset()
         afModeJob?.cancel()
         afModeJob = null
         captureController.reset()
@@ -1102,6 +1248,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             diagnostics = assembleDiagnostics(),
             captureAvailable = capabilities?.canCaptureStill == true &&
                 !captureController.captureUnsupported,
+            captureBusy = captureJob?.isActive == true || intervalController.session.value.active,
             movieAvailable = capabilities?.canRecordMovie == true &&
                 !captureController.movieUnsupported,
             recording = captureController.recording,
@@ -1129,7 +1276,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             cameraControls = cameraControls,
             batteryPercent = statusHudBattery,
             remainingImages = statusHudRemaining,
-            histogram = histogramBins
+            histogram = histogramBins,
+            interval = intervalController.session.value
         )
     }
 
@@ -1253,6 +1401,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         stopFrameLoop()
         stopRecordingTicker()
+        intervalController.requestCancel()
+        IntervalCaptureService.stop(getApplication())
         usbManager.release()
     }
 

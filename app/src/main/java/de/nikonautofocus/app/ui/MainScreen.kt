@@ -38,6 +38,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -82,6 +83,10 @@ import de.nikonautofocus.app.FocusTargetSource
 import de.nikonautofocus.app.UiState
 import de.nikonautofocus.app.focus.FocusSettings
 import de.nikonautofocus.app.focus.FocusState
+import de.nikonautofocus.app.capture.BracketingPlan
+import de.nikonautofocus.app.capture.BracketingSettings
+import de.nikonautofocus.app.capture.IntervalPhase
+import de.nikonautofocus.app.capture.IntervalSession
 import de.nikonautofocus.app.ui.theme.Accent
 import de.nikonautofocus.app.ui.theme.BlurRed
 import de.nikonautofocus.app.ui.theme.Muted
@@ -114,7 +119,12 @@ fun MainScreen(
     onSetCameraProperty: (Int, Long, Int) -> Unit,
     onRefreshDevices: () -> Unit,
     onDismissMessages: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onStartInterval: () -> Unit,
+    onPauseInterval: () -> Unit,
+    onResumeInterval: () -> Unit,
+    onCancelInterval: () -> Unit,
+    onChangeInterval: ((FocusSettings) -> FocusSettings) -> Unit
 ) {
     var liveViewFullscreen by remember { mutableStateOf(false) }
     if (liveViewFullscreen) {
@@ -176,7 +186,8 @@ fun MainScreen(
             if (settings.showExposureControls && state.connected) {
                 ExposureStrip(
                     properties = state.cameraControls,
-                    enabled = state.appControlsCamera && !state.recording,
+                    enabled = state.appControlsCamera && !state.recording &&
+                        !state.interval.active,
                     busy = state.cameraControlBusy,
                     onSelect = { property, value ->
                         onSetCameraProperty(property.propertyCode, value, property.dataType)
@@ -189,6 +200,15 @@ fun MainScreen(
                 onSetFieldEnabled, onSetFieldSize
             )
             CaptureCard(state, onCapturePhoto, onToggleRecording, onSetAppControl)
+            IntervalCard(
+                state = state,
+                settings = settings,
+                onChange = onChangeInterval,
+                onStart = onStartInterval,
+                onPause = onPauseInterval,
+                onResume = onResumeInterval,
+                onCancel = onCancelInterval
+            )
             MetricsCard(state, settings)
             ControlsCard(state, onToggleMonitoring, onFocusNow)
             DiagnosticsCard(state)
@@ -1277,6 +1297,237 @@ private fun CaptureCard(
                 onCheckedChange = { onSetAppControl(it) },
                 enabled = connected && !state.recording && !state.captureBusy
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun IntervalCard(
+    state: UiState,
+    settings: FocusSettings,
+    onChange: ((FocusSettings) -> FocusSettings) -> Unit,
+    onStart: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val session = state.interval
+    val running = session.active
+    val plan = settings.intervalPlan()
+    val canStart = state.connected && state.captureAvailable && state.appControlsCamera &&
+        !state.recording && !running && !state.captureBusy
+
+    SectionCard {
+        Text(
+            "Intervall und Belichtungsreihe",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            "Die D3400 hat keinen eigenen Intervall-Timer und kein AE-Bracketing. " +
+                "Beides macht die App, indem sie ausloest und Zeit bzw. Korrektur setzt.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Muted
+        )
+        Spacer(Modifier.height(10.dp))
+
+        Text("Intervall (Start zu Start)", style = MaterialTheme.typography.labelMedium, color = Muted)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberStepper("Std", settings.intervalHours, 0, 23, enabled = !running) {
+                onChange { s -> s.copy(intervalHours = it) }
+            }
+            NumberStepper("Min", settings.intervalMinutes, 0, 59, enabled = !running) {
+                onChange { s -> s.copy(intervalMinutes = it) }
+            }
+            NumberStepper("Sek", settings.intervalSeconds, 0, 59, enabled = !running) {
+                onChange { s -> s.copy(intervalSeconds = it) }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberStepper("Reihen", settings.intervalCount, 1, 9999, enabled = !running) {
+                onChange { s -> s.copy(intervalCount = it) }
+            }
+            NumberStepper("Delay s", settings.intervalDelaySeconds, 0, 3600, enabled = !running) {
+                onChange { s -> s.copy(intervalDelaySeconds = it) }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Belichtungsreihe", fontWeight = FontWeight.Medium)
+                Text(
+                    "Pro Intervall eine komplette Reihe. Anzahl der Reihen oben.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted
+                )
+            }
+            Switch(
+                checked = settings.bracketingEnabled,
+                onCheckedChange = { onChange { s -> s.copy(bracketingEnabled = it) } },
+                enabled = !running
+            )
+        }
+
+        if (settings.bracketingEnabled) {
+            Spacer(Modifier.height(8.dp))
+            Text("Bilder pro Reihe", style = MaterialTheme.typography.labelMedium, color = Muted)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                BracketingSettings.COUNTS.forEach { count ->
+                    FilterChip(
+                        selected = settings.bracketingCount == count,
+                        onClick = { onChange { s -> s.copy(bracketingCount = count) } },
+                        enabled = !running,
+                        label = { Text("$count") }
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Schritt " + BracketingPlan.evLabel(settings.bracketingStepThirds).removePrefix("+"),
+                style = MaterialTheme.typography.labelMedium,
+                color = Muted
+            )
+            Slider(
+                value = settings.bracketingStepThirds.toFloat(),
+                onValueChange = { onChange { s -> s.copy(bracketingStepThirds = it.toInt()) } },
+                valueRange = BracketingSettings.STEP_MIN.toFloat()..BracketingSettings.STEP_MAX.toFloat(),
+                steps = BracketingSettings.STEP_MAX - BracketingSettings.STEP_MIN - 1,
+                enabled = !running
+            )
+            Text("Reihenfolge", style = MaterialTheme.typography.labelMedium, color = Muted)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = settings.bracketingZeroFirst,
+                    onClick = { onChange { s -> s.copy(bracketingZeroFirst = true) } },
+                    enabled = !running,
+                    label = { Text("0 / − / +") }
+                )
+                FilterChip(
+                    selected = !settings.bracketingZeroFirst,
+                    onClick = { onChange { s -> s.copy(bracketingZeroFirst = false) } },
+                    enabled = !running,
+                    label = { Text("− / 0 / +") }
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = if (settings.bracketingEnabled) {
+                "${plan.shotCount} Reihen × ${plan.shotsPerSlot} = ${plan.totalPhotos} Fotos"
+            } else {
+                "${plan.shotCount} Fotos, Intervall ${IntervalSession.formatClock(plan.intervalMs)}"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium
+        )
+
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (session.phase) {
+                IntervalPhase.IDLE, IntervalPhase.FINISHED, IntervalPhase.CANCELLED, IntervalPhase.FAILED -> {
+                    Button(
+                        onClick = onStart,
+                        enabled = canStart,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
+                    ) { Text("Start", fontWeight = FontWeight.Bold) }
+                }
+                IntervalPhase.PAUSED -> {
+                    Button(
+                        onClick = onResume,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = SharpGreen, contentColor = Color.Black)
+                    ) { Text("Fortsetzen") }
+                    OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) {
+                        Text("Abbrechen")
+                    }
+                }
+                else -> {
+                    Button(
+                        onClick = onPause,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = WarnAmber, contentColor = Color.Black)
+                    ) { Text("Pause") }
+                    OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) {
+                        Text("Abbrechen")
+                    }
+                }
+            }
+        }
+
+        if (session.phase != IntervalPhase.IDLE) {
+            Spacer(Modifier.height(10.dp))
+            Text(session.progressLabel, fontWeight = FontWeight.Medium)
+            if (session.countdownMs > 0 && session.phase != IntervalPhase.PAUSED) {
+                Text(
+                    "Naechste Aufnahme in ${IntervalSession.formatClock(session.countdownMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+            if (session.etaMs > 0) {
+                Text(
+                    "Rest ca. ${IntervalSession.formatClock(session.etaMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted
+                )
+            }
+            if (session.missedSlots > 0) {
+                Text(
+                    "${session.missedSlots} verpasste Slots (Kamera beschaeftigt oder Intervall zu kurz)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WarnAmber
+                )
+            }
+            if (session.photosExpected > 0) {
+                LinearProgressIndicator(
+                    progress = { session.photosTaken.toFloat() / session.photosExpected },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+            }
+            session.log.lastOrNull()?.let {
+                Spacer(Modifier.height(6.dp))
+                Text(it, style = MaterialTheme.typography.bodySmall, color = Muted)
+            }
+        }
+    }
+}
+
+@Composable
+private fun NumberStepper(
+    label: String,
+    value: Int,
+    min: Int,
+    max: Int,
+    enabled: Boolean,
+    onChange: (Int) -> Unit
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(72.dp)) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = Muted)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(
+                onClick = { onChange((value - 1).coerceAtLeast(min)) },
+                enabled = enabled && value > min,
+                modifier = Modifier.width(28.dp)
+            ) { Text("−") }
+            Text(
+                "$value",
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(36.dp),
+                textAlign = TextAlign.Center
+            )
+            TextButton(
+                onClick = { onChange((value + 1).coerceAtMost(max)) },
+                enabled = enabled && value < max,
+                modifier = Modifier.width(28.dp)
+            ) { Text("+") }
         }
     }
 }
