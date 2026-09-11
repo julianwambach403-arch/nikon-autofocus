@@ -17,6 +17,8 @@ import de.nikonautofocus.app.focus.FocusState
 import de.nikonautofocus.app.focus.FocusStateMachine
 import de.nikonautofocus.app.focus.FocusStatus
 import de.nikonautofocus.app.liveview.AfAreaCoordinates
+import de.nikonautofocus.app.liveview.LiveViewHeader
+import de.nikonautofocus.app.liveview.LiveViewHeaderLayout
 import de.nikonautofocus.app.liveview.LiveViewProcessor
 import de.nikonautofocus.app.settings.SettingsRepository
 import de.nikonautofocus.app.usb.AfModeState
@@ -37,6 +39,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /** Everything the screen renders. */
 data class UiState(
@@ -111,6 +114,9 @@ enum class FocusTargetSource {
     NONE
 }
 
+/** A ChangeAfArea request (image fractions) that still awaits confirmation by a header. */
+private data class PendingAfAim(val x: Float, val y: Float, val expiresAt: Long)
+
 /** AF frame position for the preview overlay, in fractions of the displayed image. */
 data class AfFrameOverlay(
     val centerX: Float,
@@ -172,7 +178,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastAfImageHeight = 0
     private var lastJpegWidth = 0
     private var lastJpegHeight = 0
+    private var lastHeaderLayout: LiveViewHeaderLayout? = null
     private var afModeJob: Job? = null
+
+    /** Position the camera was last asked to put its AF frame at, until a header confirms. */
+    private var pendingAfAim: PendingAfAim? = null
+
+    /** Outcome of the last AF-frame verification, shown on the diagnostics page. */
+    private var afAimReport: String? = null
+    private var lastAfAreaText: String? = null
+    private var unknownAfGridWarned = false
+    private var lastExposureProgram: Long? = null
 
     private var cameraControls: List<CameraPropertyState> = emptyList()
     private var statusHudBattery: Int? = null
@@ -490,8 +506,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun changeCameraAfArea(x: Float, y: Float) {
         if (!usbManager.isConnected) return
         if (capabilities?.changeAfArea != true) return
-        val aim = AfAreaCoordinates.toLiveViewPixels(x, y, lastJpegWidth, lastJpegHeight)
-            ?: return
+        val aim = afAreaPixels(x, y)
+        if (aim == null) {
+            warnUnknownAfGrid()
+            return
+        }
         viewModelScope.launch {
             val code = try {
                 usbManager.withCamera { it.changeAfArea(aim.first, aim.second) }
@@ -499,7 +518,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 publish(error = e.error.message)
                 return@launch
             }
-            if (code != PtpConstants.RC_OK) {
+            lastAfAreaText = "ChangeAfArea 0x9205 (${aim.first}, ${aim.second}) -> " +
+                PtpConstants.responseName(code)
+            if (code == PtpConstants.RC_OK) {
+                expectAfFrameAt(x, y)
+            } else {
                 publish(
                     warning = "AF-Messfeld liess sich nicht verschieben: " +
                         PtpConstants.responseName(code)
@@ -507,6 +530,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    /**
+     * Pixel coordinates for ChangeAfArea in the camera's whole-image grid, taken from
+     * the last parsed LiveView header. Null while no header has been understood - then
+     * the grid is unknown and nothing may be sent (see [AfAreaCoordinates]).
+     */
+    private fun afAreaPixels(fractionX: Float, fractionY: Float): Pair<Int, Int>? =
+        AfAreaCoordinates.toAfAreaPixels(fractionX, fractionY, lastAfImageWidth, lastAfImageHeight)
+
+    private fun warnUnknownAfGrid() {
+        if (unknownAfGridWarned) return
+        unknownAfGridWarned = true
+        publish(
+            warning = "Der LiveView-Header dieser Kamera wird nicht erkannt " +
+                "($liveViewHeaderBytes Byte). Ohne ihn ist der Koordinatenraum fuer " +
+                "ChangeAfArea unbekannt; das eigene Fokusfeld wird nur in der App gemessen, " +
+                "der Autofokus laeuft auf dem AF-Messfeld der Kamera."
+        )
+    }
+
+    /** Remember where the AF frame should show up so the next header can confirm it. */
+    private fun expectAfFrameAt(fractionX: Float, fractionY: Float) {
+        pendingAfAim = PendingAfAim(
+            x = fractionX,
+            y = fractionY,
+            expiresAt = SystemClock.elapsedRealtime() + AF_AIM_CHECK_MS
+        )
+    }
+
+    /**
+     * Compares the AF frame the camera reports with the last requested position. Runs on
+     * the first parsed header after a ChangeAfArea; the outcome goes to the diagnostics
+     * and, when the camera clearly ignored the request, to the warning banner.
+     */
+    private fun verifyAfAim(header: LiveViewHeader) {
+        val aim = pendingAfAim ?: return
+        pendingAfAim = null
+        if (SystemClock.elapsedRealtime() > aim.expiresAt) return
+
+        val fieldHalf = settingsRepository.current.measuringField?.size?.div(2f) ?: 0f
+        val frameHalf = maxOf(header.focusWidthFraction, header.focusHeightFraction) / 2f
+        val tolerance = maxOf(fieldHalf, frameHalf) + AF_AIM_TOLERANCE
+        val matches = AfAreaCoordinates.reportedFrameMatches(
+            requestedX = aim.x,
+            requestedY = aim.y,
+            reportedCenterX = header.focusCenterXFraction,
+            reportedCenterY = header.focusCenterYFraction,
+            toleranceFraction = tolerance
+        )
+        val report = "Ziel ${pct(aim.x)}/${pct(aim.y)}, Kamera meldet " +
+            "${pct(header.focusCenterXFraction)}/${pct(header.focusCenterYFraction)} " +
+            "(Gesamtbild ${header.imageWidth}x${header.imageHeight}, " +
+            "Layout ${header.layout.label})"
+        afAimReport = (if (matches) "OK: " else "ABWEICHUNG: ") + report
+        if (!matches) {
+            publish(
+                warning = "Die Kamera hat das AF-Messfeld nicht dort gesetzt, wo das " +
+                    "Fokusfeld liegt ($report). Pruefe den AF-Messfeldmodus " +
+                    "(0xD05D): Gesichtserkennung und Motivverfolgung ignorieren die Vorgabe."
+            )
+        }
+    }
+
+    private fun pct(fraction: Float): String = "${(fraction * 100).roundToInt()} %"
 
     fun setManualFieldEnabled(enabled: Boolean) {
         updateSettings { it.copy(manualFieldEnabled = enabled) }
@@ -742,6 +829,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lastAfImageHeight = 0
         lastJpegWidth = 0
         lastJpegHeight = 0
+        lastHeaderLayout = null
+        pendingAfAim = null
+        afAimReport = null
+        lastAfAreaText = null
+        unknownAfGridWarned = false
+        lastExposureProgram = null
         cameraControls = emptyList()
         statusHudBattery = null
         statusHudRemaining = null
@@ -869,6 +962,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         afFrame = decoded.header?.let { header ->
             lastAfImageWidth = header.imageWidth
             lastAfImageHeight = header.imageHeight
+            lastHeaderLayout = header.layout
+            verifyAfAim(header)
             AfFrameOverlay(
                 centerX = header.focusCenterXFraction,
                 centerY = header.focusCenterYFraction,
@@ -908,14 +1003,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         publish(info = if (manual) "Manueller Autofokus ..." else "Unschaerfe erkannt - Autofokus")
 
         val settings = settingsRepository.current
-        val aim = manualFieldAimPixels()
+        val field = settings.measuringField
+        val aim = if (settings.manualFieldEnabled && field != null) {
+            afAreaPixels(field.centerX, field.centerY)
+        } else {
+            null
+        }
+        if (settings.manualFieldEnabled && aim == null && capabilities?.changeAfArea == true) {
+            warnUnknownAfGrid()
+        }
         val outcome = focusController.triggerAutofocus(
             settings = settings,
             aimX = aim?.first,
             aimY = aim?.second
         )
+        if (aim != null && field != null) expectAfFrameAt(field.centerX, field.centerY)
         if (settings.manualFieldEnabled) {
             refreshAfModes()
+        }
+        runCatching {
+            usbManager.withCameraOrNull { camera ->
+                lastExposureProgram = camera.readExposureProgram()
+                camera.lastAfAreaReport?.let { lastAfAreaText = it }
+            }
         }
 
         if (outcome.disableAutofocus) {
@@ -933,20 +1043,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         publish(
             info = outcome.description,
             warning = outcome.warning
-        )
-    }
-
-    /**
-     * Pixel coordinates for ChangeAfArea on the LiveView JPEG grid (not the header's
-     * whole-image size). See [AfAreaCoordinates].
-     */
-    private fun manualFieldAimPixels(): Pair<Int, Int>? {
-        val field = settingsRepository.current.measuringField ?: return null
-        return AfAreaCoordinates.toLiveViewPixels(
-            field.centerX,
-            field.centerY,
-            lastJpegWidth,
-            lastJpegHeight
         )
     }
 
@@ -1003,9 +1099,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             autofocusFlashActive = SystemClock.elapsedRealtime() < autofocusFlashUntil,
             captureFlashActive = SystemClock.elapsedRealtime() < captureFlashUntil,
             scoreHistory = history.toList(),
-            diagnostics = movieDiagnosticsText?.let { movie ->
-                (diagnosticsText ?: "") + "\n--- Videostart abgelehnt ---\n" + movie
-            } ?: diagnosticsText,
+            diagnostics = assembleDiagnostics(),
             captureAvailable = capabilities?.canCaptureStill == true &&
                 !captureController.captureUnsupported,
             movieAvailable = capabilities?.canRecordMovie == true &&
@@ -1061,6 +1155,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             height = heightFraction,
             focused = stateMachine.snapshot().isSharp
         )
+    }
+
+    private fun assembleDiagnostics(): String? {
+        val base = diagnosticsText ?: return null
+        return buildString {
+            append(base)
+            afFieldDiagnostics()?.let { append("\n--- AF-Feld / LiveView-Header ---\n").append(it) }
+            movieDiagnosticsText?.let { append("\n--- Videostart abgelehnt ---\n").append(it) }
+        }
+    }
+
+    /**
+     * Everything needed to judge whether ChangeAfArea can work on this body: which header
+     * layout was recognised, the grid the camera expects, what was last sent and what the
+     * camera reported afterwards. Null before the first LiveView frame.
+     */
+    private fun afFieldDiagnostics(): String? {
+        if (lastJpegWidth <= 0) return null
+        return buildString {
+            appendLine("LiveView-JPEG: ${lastJpegWidth}x$lastJpegHeight, Header $liveViewHeaderBytes Byte")
+            appendLine(
+                "Header-Layout: " + (lastHeaderLayout?.label ?: "NICHT erkannt - AF-Rahmen und " +
+                    "ChangeAfArea-Koordinaten unbekannt")
+            )
+            if (lastAfImageWidth > 0) {
+                appendLine("Gesamtbild (Koordinatenraum 0x9205): ${lastAfImageWidth}x$lastAfImageHeight")
+            }
+            appendLine("Letztes ChangeAfArea: " + (lastAfAreaText ?: "noch keins gesendet"))
+            appendLine("Kontrolle AF-Rahmen: " + (afAimReport ?: "noch nicht geprueft"))
+            appendLine(
+                "Belichtungsprogramm 0x500E: " +
+                    (lastExposureProgram?.let { PtpConstants.exposureProgramName(it) } ?: "n/v") +
+                    " (kein Einfluss auf AfDrive/ChangeAfArea)"
+            )
+        }
     }
 
     private fun buildDiagnostics(info: PtpDeviceInfo): String {
@@ -1134,6 +1263,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val EMPTY_FRAME_WARNING = 25
         private const val EMPTY_FRAME_WARNING_MS = 4_000L
         private const val RECORDING_TICK_MS = 500L
+
+        /** How long a ChangeAfArea request waits for a header frame to confirm it. */
+        private const val AF_AIM_CHECK_MS = 4_000L
+
+        /** Extra slack on top of the field / frame half size, in image fractions. */
+        private const val AF_AIM_TOLERANCE = 0.06f
 
         /** Sentinel so publish() can tell "clear this banner" from "leave it alone". */
         private val KEEP = Any()

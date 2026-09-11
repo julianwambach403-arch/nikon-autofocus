@@ -372,32 +372,38 @@ das konkrete Gerät nicht abschließend klären lässt.
 ### Der Rahmen
 
 Die Position des AF-Messfelds steht im **Vendor-Header, den Nikon dem LiveView-JPEG
-voranstellt**. Der Header ist – anders als PTP selbst – **Big-Endian**:
+voranstellt**. Der Header ist – anders als PTP selbst – **Big-Endian**. Es gibt **zwei
+Layouts** mit identischer Feldreihenfolge; das neuere hat schlicht acht Byte mehr davor.
+digiCamControl nutzt das klassische für D90/D5000/D7000/D5100 (`NikonBase`) und das
+erweiterte für D600/D800/D5200/D5300/D5500/D5600/D3300 und **D3400** (`NikonD600Base`):
 
-| Offset | Typ | Feld |
-|---|---|---|
-| 0 | u16 | Breite des LiveView-JPEGs |
-| 2 | u16 | Höhe des LiveView-JPEGs |
-| 4 | u16 | Breite des Gesamtbilds = **Koordinatenraum des AF-Felds** |
-| 6 | u16 | Höhe des Gesamtbilds |
-| 16 | u16 | Breite des AF-Rahmens |
-| 18 | u16 | Höhe des AF-Rahmens |
-| 20 | u16 | Mittelpunkt X des AF-Rahmens |
-| 22 | u16 | Mittelpunkt Y des AF-Rahmens |
-| 29 | u8 | Rotation (1 = −90°, 2 = +90°) |
-| 40 | u8 | Fokusstatus (**1 = nicht scharf**) |
-| 60 | u8 | Videoaufnahme läuft |
+| klassisch | erweitert (+8) | Typ | Feld |
+|---|---|---|---|
+| 0 | 8 | u16 | Breite des LiveView-JPEGs |
+| 2 | 10 | u16 | Höhe des LiveView-JPEGs |
+| 4 | 12 | u16 | Breite des Gesamtbilds = **Koordinatenraum des AF-Felds und von `ChangeAfArea`** |
+| 6 | 14 | u16 | Höhe des Gesamtbilds |
+| 16 | 24 | u16 | Breite des AF-Rahmens |
+| 18 | 26 | u16 | Höhe des AF-Rahmens |
+| 20 | 28 | u16 | Mittelpunkt X des AF-Rahmens |
+| 22 | 30 | u16 | Mittelpunkt Y des AF-Rahmens |
+| 29 | 37 | u8 | Rotation (1 = −90°, 2 = +90°) |
+| 40 | 48 | u8 | Fokusstatus (**1 = nicht scharf**) |
+| 60 | 68 | u8 | Videoaufnahme läuft |
 
 Die App zeichnet daraus einen Rahmen mit Eckwinkeln über das Vorschaubild:
 **grün = Kamera meldet Fokus, gelb = kein Fokus**.
 
 **Warum das nicht blind übernommen wird:** Die Headerlänge schwankt je nach Body und
-Firmware (8, 128, 384 Byte), und bei einem anderen Layout wären die gelesenen Zahlen
+Firmware (8, 64, 128, 384 Byte), und bei einem anderen Layout wären die gelesenen Zahlen
 Unsinn. Ein selbstbewusst an der falschen Stelle gezeichneter AF-Rahmen ist schlechter als
 gar keiner. Deshalb prüft der Parser jeden Header, bevor er ihm glaubt – die stärkste
-Prüfung ist, dass **Breite/Höhe auf Offset 0/2 exakt zum dekodierten JPEG passen müssen**.
-Zusätzlich müssen Rahmengröße und Mittelpunkt innerhalb des Bilds liegen. Schlägt eine
-Prüfung fehl, wird schlicht kein Rahmen gezeichnet. Fünf Unit-Tests decken das ab.
+Prüfung ist, dass **die LiveView-Breite/Höhe im Header exakt zum dekodierten JPEG passen
+muss**. Bei 384-Byte-Headern wird zuerst das erweiterte Layout probiert, sonst das
+klassische; das jeweils andere ist der Fallback. Zusätzlich müssen Rahmengröße und
+Mittelpunkt innerhalb des Bilds liegen. Schlägt alles fehl, wird schlicht kein Rahmen
+gezeichnet. Die Diagnose-Seite zeigt unter „AF-Feld / LiveView-Header", welches Layout
+erkannt wurde. Unit-Tests decken beide Layouts ab.
 
 Die Zeichenfläche berücksichtigt außerdem, dass das Bild mit `ContentScale.Fit` zentriert
 dargestellt wird: Der Rahmen wird gegen das **tatsächlich gezeichnete Bildrechteck**
@@ -427,8 +433,30 @@ andere Varianz-Skala. Die App weist im UI darauf hin.
 
 ### AF-Messfeld verschieben
 
-Tippen ins Vorschaubild sendet `Nikon_ChangeAfArea` (0x9205) mit Koordinaten im
-LiveView-JPEG (Header Offset 0/2), nicht im großen Gesamtbild-Raster (Offset 4/6).
+Tippen oder Ziehen im Vorschaubild sendet `Nikon_ChangeAfArea` (0x9205) mit Koordinaten im
+**Gesamtbild-Raster aus dem LiveView-Header** (klassisch Offset 4/6, erweitert 12/14) –
+genau wie digiCamControl (`LiveViewViewModel.SetFocusPos` → `NikonBase.Focus(x, y)` skaliert
+mit `ImageWidth/ImageHeight`). Vor jedem `AfDrive` mit aktivem eigenem Fokusfeld passiert
+dasselbe: erst ChangeAfArea auf die Feldmitte, bei Gesichtserkennung/Motivverfolgung
+zusätzlich Umschalten auf Spot bzw. Normal (0xD05D), dann AfDrive.
+
+**Warum es vorher immer oben links scharf wurde:** Die D3400 liefert den erweiterten
+Header. Mit dem klassischen Layout gelesen stimmten JPEG-Breite/Höhe an Offset 0/2 nicht,
+also gab es keinen erkannten Header – und die App schickte Koordinaten im 640-px-JPEG-Raster
+(oder im geratenen Gesamtbild). Für ein Gesamtbild von mehreren tausend Pixeln liegt
+`(320, 212)` in der linken oberen Ecke; dort blieb das Messfeld.
+
+**Kontrolle statt Vertrauen:** Nach jedem ChangeAfArea vergleicht die App den im nächsten
+Header gemeldeten AF-Mittelpunkt mit der angeforderten Position. Weicht er um mehr als
+Feld-/Rahmenhälfte plus 6 % ab, erscheint eine Warnung mit beiden Positionen; das Ergebnis
+steht außerdem in der Diagnose. Wird der Header gar nicht erkannt, sendet die App **kein**
+ChangeAfArea (ein geratenes Raster ist schlimmer als keins), warnt einmal und lässt den
+`AfDrive` auf dem Messfeld laufen, das die Kamera gerade hat – ein normaler Autofokus.
+
+**Belichtungsprogramm:** Weder AfDrive noch ChangeAfArea noch 0xD05D hängen am Moduswahlrad;
+P, S, A und M verhalten sich identisch. Nikon sperrt die Fernsteuerung nur in AUTO, GUIDE,
+EFFECTS und den Motivprogrammen. Die Diagnose zeigt den zuletzt gelesenen Wert von 0x500E
+neben dem AF-Feld-Ergebnis, damit ein Zusammenhang sichtbar wäre, falls es doch einen gibt.
 
 ### Wenn der Videostart mit `Nikon_InvalidStatus` abgelehnt wird
 

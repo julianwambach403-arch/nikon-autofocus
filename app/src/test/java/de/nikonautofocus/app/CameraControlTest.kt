@@ -1,6 +1,7 @@
 package de.nikonautofocus.app
 
 import de.nikonautofocus.app.analysis.LumaHistogram
+import de.nikonautofocus.app.liveview.AfAreaCoordinates
 import de.nikonautofocus.app.usb.CameraControlCatalog
 import de.nikonautofocus.app.usb.CameraControlKind
 import de.nikonautofocus.app.usb.PtpConstants
@@ -10,6 +11,7 @@ import de.nikonautofocus.app.usb.PtpReader
 import de.nikonautofocus.app.usb.PtpStorageInfo
 import de.nikonautofocus.app.usb.PtpWriter
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -167,16 +169,40 @@ class CameraControlTest {
     }
 
     @Test
-    fun `ChangeAfArea uses the liveview JPEG grid not the whole-image grid`() {
-        val center = de.nikonautofocus.app.liveview.AfAreaCoordinates.toLiveViewPixels(
-            0.5f, 0.5f, 640, 424
-        )
-        assertEquals(320, center!!.first)
-        assertEquals(212, center.second)
-        val topLeft = de.nikonautofocus.app.liveview.AfAreaCoordinates.toLiveViewPixels(
-            0f, 0f, 640, 424
-        )
+    fun `ChangeAfArea maps fractions onto the header whole-image grid`() {
+        // digiCamControl: tap fraction * ImageWidth/ImageHeight from the LiveView header.
+        val center = AfAreaCoordinates.toAfAreaPixels(0.5f, 0.5f, 6000, 4000)
+        assertEquals(3000, center!!.first)
+        assertEquals(2000, center.second)
+        val topLeft = AfAreaCoordinates.toAfAreaPixels(0f, 0f, 6000, 4000)
         assertEquals(1, topLeft!!.first)
         assertEquals(1, topLeft.second)
+        val bottomRight = AfAreaCoordinates.toAfAreaPixels(1f, 1f, 6000, 4000)
+        assertEquals(6000, bottomRight!!.first)
+        assertEquals(4000, bottomRight.second)
+    }
+
+    @Test
+    fun `without a parsed header the AF grid is unknown and nothing is sent`() {
+        assertNull(AfAreaCoordinates.toAfAreaPixels(0.5f, 0.5f, 0, 0))
+    }
+
+    @Test
+    fun `reported AF frame is compared against the request with a tolerance`() {
+        assertTrue(
+            AfAreaCoordinates.reportedFrameMatches(
+                requestedX = 0.7f, requestedY = 0.3f,
+                reportedCenterX = 0.68f, reportedCenterY = 0.33f,
+                toleranceFraction = 0.1f
+            )
+        )
+        // Camera left the point top-left: the classic symptom, must be flagged.
+        assertTrue(
+            !AfAreaCoordinates.reportedFrameMatches(
+                requestedX = 0.7f, requestedY = 0.3f,
+                reportedCenterX = 0.08f, reportedCenterY = 0.1f,
+                toleranceFraction = 0.1f
+            )
+        )
     }
 }

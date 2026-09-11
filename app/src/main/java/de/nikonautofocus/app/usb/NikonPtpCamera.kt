@@ -722,10 +722,20 @@ class NikonPtpCamera(
     }
 
     /**
+     * Last ChangeAfArea request and the camera's answer, for the diagnostics page.
+     * Null until the first attempt of the session.
+     */
+    var lastAfAreaReport: String? = null
+        private set
+
+    /**
      * Moves the AF frame inside the LiveView image.
      *
-     * Coordinates are in the LiveView JPEG pixel grid (header offset 0/2), not the
-     * larger "whole image" grid at offset 4/6.
+     * Coordinates are in the "whole image" grid the LiveView header reports
+     * ([de.nikonautofocus.app.liveview.LiveViewHeader.imageWidth] / `imageHeight`),
+     * the same space the camera uses for its own AF frame centre. digiCamControl sends
+     * exactly this grid (`NikonBase.Focus(x, y)`). Nothing here depends on the exposure
+     * program; P, S, A and M behave the same.
      */
     fun changeAfArea(x: Int, y: Int): Int {
         if (!capabilities.changeAfArea) return PtpConstants.RC_OPERATION_NOT_SUPPORTED
@@ -733,20 +743,25 @@ class NikonPtpCamera(
         val response = runCatching {
             session.transact(PtpConstants.OC_NIKON_CHANGE_AF_AREA, intArrayOf(x, y))
         }.getOrNull() ?: return PtpConstants.RC_GENERAL_ERROR
+        lastAfAreaReport = "ChangeAfArea 0x9205 ($x, $y) -> " +
+            PtpConstants.responseName(response.responseCode)
         return response.responseCode
     }
 
     /**
      * Aims LiveView AF at the user measuring field before [OC_NIKON_AF_DRIVE].
      *
-     * Face / wide / subject-tracking modes ignore ChangeAfArea; those are switched to
-     * Spot (or Normal) when the body exposes 0xD05D. Then the AF point is moved to
-     * [aimX], [aimY] so contrast-detect AF actually runs on that spot.
+     * Face / subject-tracking modes ignore ChangeAfArea; those are switched to Spot (or
+     * Normal) when the body exposes 0xD05D. Then the AF point is moved to [aimX], [aimY]
+     * so contrast-detect AF actually runs on that spot.
+     *
+     * Without coordinates (the header of this body could not be parsed, so the grid is
+     * unknown) nothing is touched: a plain AfDrive on the camera's own AF point is a
+     * proper autofocus, a point sent in a guessed grid is not.
      */
     private fun prepareFocusOnManualField(aimX: Int?, aimY: Int?) {
         if (aimX == null || aimY == null) {
-            Log.w(TAG, "Manuelles Fokusfeld aktiv, aber keine Zielkoordinaten")
-            preferSelectableAfArea()
+            Log.w(TAG, "Manuelles Fokusfeld aktiv, aber Koordinatenraum unbekannt - AfDrive ohne ChangeAfArea")
             return
         }
         // Move the point first so a Face->Spot switch does not sit on the default
@@ -770,8 +785,9 @@ class NikonPtpCamera(
     }
 
     /**
-     * Face / wide / tracking AF will not honour a user-placed point. Spot is preferred;
-     * Normal is the fallback when the body has no Spot value.
+     * Face-priority and subject-tracking AF will not honour a user-placed point. Spot,
+     * Normal and Wide all do (they only differ in frame size), so those are left alone;
+     * otherwise Spot is preferred and Normal is the fallback when the body has no Spot.
      */
     private fun preferSelectableAfArea() {
         if (!capabilities.hasAfAreaModeProp) return
@@ -780,7 +796,8 @@ class NikonPtpCamera(
         }.getOrNull() ?: return
         val current = desc.currentValue
         if (current == PtpConstants.AF_AREA_SPOT ||
-            current == PtpConstants.AF_AREA_NORMAL
+            current == PtpConstants.AF_AREA_NORMAL ||
+            current == PtpConstants.AF_AREA_WIDE
         ) {
             return
         }
@@ -982,6 +999,10 @@ class NikonPtpCamera(
         if (!deviceInfo.hasProperty(code)) return null
         return runCatching { session.getDevicePropValue(code, dataType) }.getOrNull()
     }
+
+    /** Mode dial position (0x500E), or null when the body does not expose it. */
+    fun readExposureProgram(): Long? =
+        readPropOrNull(PtpConstants.DPC_EXPOSURE_PROGRAM_MODE, PtpConstants.DTC_UINT16)
 
     /** Reads everything that can explain a refused movie start. */
     fun collectMovieDiagnostics(lastResponseCode: Int): MovieDiagnostics = MovieDiagnostics(
