@@ -148,4 +148,21 @@ class CameraControlTest {
         assertEquals(0f, topLeft!!.x, 0.001f)
         assertEquals(0f, topLeft.y, 0.001f)
     }
+
+    @Test
+    fun `device property descriptor accepts enum and range values`() {
+        val enumerated = PtpDevicePropDesc(
+            propertyCode = PtpConstants.DPC_NIKON_LIVE_VIEW_AF_AREA,
+            dataType = PtpConstants.DTC_UINT8,
+            writable = true,
+            currentValue = 0,
+            defaultValue = 0,
+            enumValues = listOf(0, 1, 2, 4),
+            minimum = null,
+            maximum = null,
+            step = null
+        )
+        assertTrue(enumerated.accepts(PtpConstants.AF_AREA_SPOT))
+        assertTrue(!enumerated.accepts(PtpConstants.AF_AREA_TRACKING))
+    }
 }

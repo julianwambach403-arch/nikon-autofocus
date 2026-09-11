@@ -143,6 +143,14 @@ data class PtpDevicePropDesc(
     val maximum: Long?,
     val step: Long?
 ) {
+    fun accepts(value: Long): Boolean {
+        if (enumValues.isNotEmpty()) return enumValues.contains(value)
+        val min = minimum
+        val max = maximum
+        if (min != null && max != null) return value in min..max
+        return true
+    }
+
     companion object {
         private const val FORM_NONE = 0
         private const val FORM_RANGE = 1

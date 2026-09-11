@@ -515,7 +515,12 @@ class NikonPtpCamera(
      * duration, which guarantees that no LiveView poll and no second AF command can overlap
      * with it. That is the core of the anti focus-pumping design.
      */
-    fun triggerAutofocus(timeoutMs: Long = 5000): AutofocusResult {
+    fun triggerAutofocus(
+        timeoutMs: Long = 5000,
+        aimX: Int? = null,
+        aimY: Int? = null,
+        aimManualField: Boolean = false
+    ): AutofocusResult {
         if (autofocusUnsupported) return AutofocusResult.Unsupported
         if (!capabilities.afDrive) {
             autofocusUnsupported = true
@@ -534,6 +539,10 @@ class NikonPtpCamera(
                 "DeviceReady meldet ${PtpConstants.responseName(readyBefore)} " +
                     "(z. B. laufende interne Videoaufnahme oder Kartenzugriff)"
             )
+        }
+
+        if (aimManualField) {
+            prepareFocusOnManualField(aimX, aimY)
         }
 
         val response = try {
@@ -725,6 +734,58 @@ class NikonPtpCamera(
             session.transact(PtpConstants.OC_NIKON_CHANGE_AF_AREA, intArrayOf(x, y))
         }.getOrNull() ?: return PtpConstants.RC_GENERAL_ERROR
         return response.responseCode
+    }
+
+    /**
+     * Aims LiveView AF at the user measuring field before [OC_NIKON_AF_DRIVE].
+     *
+     * Face / wide / subject-tracking modes ignore ChangeAfArea; those are switched to
+     * Spot (or Normal) when the body exposes 0xD05D. Then the AF point is moved to
+     * [aimX], [aimY] so contrast-detect AF actually runs on that spot.
+     */
+    private fun prepareFocusOnManualField(aimX: Int?, aimY: Int?) {
+        preferSelectableAfArea()
+        if (aimX == null || aimY == null) {
+            Log.w(TAG, "Manuelles Fokusfeld aktiv, aber keine Zielkoordinaten")
+            return
+        }
+        if (!capabilities.changeAfArea) {
+            Log.w(TAG, "ChangeAfArea 0x9205 fehlt - AF laeuft ohne Feldverschiebung")
+            return
+        }
+        val code = changeAfArea(aimX, aimY)
+        Log.i(TAG, "ChangeAfArea -> ($aimX,$aimY): ${PtpConstants.responseName(code)}")
+        if (code == PtpConstants.RC_OK || code == PtpConstants.RC_DEVICE_BUSY) {
+            waitUntilReady(intervalMs = 20, timeoutMs = 1500)
+        }
+    }
+
+    /**
+     * Face / wide / tracking AF will not honour a user-placed point. Spot is preferred;
+     * Normal is the fallback when the body has no Spot value.
+     */
+    private fun preferSelectableAfArea() {
+        if (!capabilities.hasAfAreaModeProp) return
+        val desc = runCatching {
+            session.getDevicePropDesc(PtpConstants.DPC_NIKON_LIVE_VIEW_AF_AREA)
+        }.getOrNull() ?: return
+        val current = desc.currentValue
+        if (current == PtpConstants.AF_AREA_SPOT ||
+            current == PtpConstants.AF_AREA_NORMAL
+        ) {
+            return
+        }
+        val target = when {
+            desc.accepts(PtpConstants.AF_AREA_SPOT) -> PtpConstants.AF_AREA_SPOT
+            desc.accepts(PtpConstants.AF_AREA_NORMAL) -> PtpConstants.AF_AREA_NORMAL
+            else -> return
+        }
+        val code = setAfMode(PtpConstants.DPC_NIKON_LIVE_VIEW_AF_AREA, target)
+        Log.i(
+            TAG,
+            "AF-Messfeld ${PtpConstants.afAreaModeName(current)} -> " +
+                "${PtpConstants.afAreaModeName(target)}: ${PtpConstants.responseName(code)}"
+        )
     }
 
     // ---------------------------------------------------------------- still capture

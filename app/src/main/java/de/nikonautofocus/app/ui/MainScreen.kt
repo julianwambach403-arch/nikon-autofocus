@@ -983,7 +983,8 @@ private fun ManualFieldControls(
                 fontWeight = FontWeight.Medium
             )
             Text(
-                "Schaerfe nur im Feld messen. Feld mit dem Finger ziehen oder antippen. " +
+                "Schaerfe nur im Feld messen. Feld ziehen oder antippen; AF (Taste oder " +
+                    "Ueberwachung) stellt auf diese Stelle scharf. " +
                     "ACHTUNG: aendert die Skala des Schaerfewerts, Schwellwert neu einstellen.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Muted

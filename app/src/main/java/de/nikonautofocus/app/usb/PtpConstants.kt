@@ -195,6 +195,12 @@ object PtpConstants {
      */
     const val DPC_NIKON_LIVE_VIEW_AF_AREA = 0xD05D
 
+    const val AF_AREA_FACE = 0L
+    const val AF_AREA_WIDE = 1L
+    const val AF_AREA_NORMAL = 2L
+    const val AF_AREA_TRACKING = 3L
+    const val AF_AREA_SPOT = 4L
+
     /** LiveView servo mode (0 single, 1 continuous, 2 full time, 3/4 manual). */
     const val DPC_NIKON_LIVE_VIEW_AF_FOCUS = 0xD061
 

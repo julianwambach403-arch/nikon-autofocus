@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /** Everything the screen renders. */
 data class UiState(
@@ -169,6 +170,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var afServoMode: AfModeState? = null
     private var lastAfImageWidth = 0
     private var lastAfImageHeight = 0
+    private var lastJpegWidth = 0
+    private var lastJpegHeight = 0
     private var afModeJob: Job? = null
 
     private var cameraControls: List<CameraPropertyState> = emptyList()
@@ -738,6 +741,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         afServoMode = null
         lastAfImageWidth = 0
         lastAfImageHeight = 0
+        lastJpegWidth = 0
+        lastJpegHeight = 0
         cameraControls = emptyList()
         statusHudBattery = null
         statusHudRemaining = null
@@ -845,6 +850,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         consecutiveEmptyFrames = 0
         lastGoodFrameAt = SystemClock.elapsedRealtime()
 
+        lastJpegWidth = decoded.bitmap.width
+        lastJpegHeight = decoded.bitmap.height
+
         val result = analyzer.analyze(decoded.bitmap, currentSettings.measuringField)
         _preview.value = decoded.bitmap.asImageBitmap()
 
@@ -900,7 +908,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autofocusFlashUntil = SystemClock.elapsedRealtime() + AF_FLASH_MS
         publish(info = if (manual) "Manueller Autofokus ..." else "Unschaerfe erkannt - Autofokus")
 
-        val outcome = focusController.triggerAutofocus(settingsRepository.current)
+        val settings = settingsRepository.current
+        val aim = manualFieldAimPixels()
+        val outcome = focusController.triggerAutofocus(
+            settings = settings,
+            aimX = aim?.first,
+            aimY = aim?.second
+        )
+        if (settings.manualFieldEnabled) {
+            refreshAfModes()
+        }
 
         if (outcome.disableAutofocus) {
             stateMachine.onAutofocusUnsupported(outcome.warning ?: outcome.description)
@@ -918,6 +935,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             info = outcome.description,
             warning = outcome.warning
         )
+    }
+
+    /**
+     * Pixel coordinates for ChangeAfArea: the LiveView header's whole-image size when
+     * known, otherwise the JPEG. The user field is stored as 0..1 of the displayed frame.
+     */
+    private fun manualFieldAimPixels(): Pair<Int, Int>? {
+        val field = settingsRepository.current.measuringField ?: return null
+        val width = lastAfImageWidth.takeIf { it > 0 } ?: lastJpegWidth
+        val height = lastAfImageHeight.takeIf { it > 0 } ?: lastJpegHeight
+        if (width <= 0 || height <= 0) return null
+        return (field.centerX * width).roundToInt().coerceIn(1, width) to
+            (field.centerY * height).roundToInt().coerceIn(1, height)
     }
 
     // ------------------------------------------------------------------ helpers
